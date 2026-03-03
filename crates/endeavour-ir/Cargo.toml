@@ -5,9 +5,12 @@ edition = "2021"
 license.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+endeavour-ida = { path = "../endeavour-ida" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true
