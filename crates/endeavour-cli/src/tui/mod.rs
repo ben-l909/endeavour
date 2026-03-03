@@ -9,13 +9,14 @@ use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
 use endeavour_llm::{LlmError, ProviderStream, StreamChunkKind, Usage};
 use futures_util::StreamExt;
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 pub mod app;
 pub mod event;
+mod status_bar;
 
 pub use app::AppEvent;
 
