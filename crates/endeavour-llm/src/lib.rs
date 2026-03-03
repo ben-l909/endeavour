@@ -1,5 +1,11 @@
+//! LLM provider abstraction layer supporting multiple AI backends.
+//!
+//! This crate provides a unified interface for interacting with different LLM providers
+//! (Anthropic, OpenAI) with support for both completion and streaming responses.
+
 mod anthropic;
 mod error;
+/// Mock provider for testing LLM integrations.
 pub mod mock;
 mod openai;
 mod provider;
@@ -13,6 +19,11 @@ pub use openai::OpenAiProvider;
 pub use provider::{LlmProvider, ProviderStream};
 pub use types::{CompletionRequest, CompletionResponse, Message, Role, StreamChunk};
 
+/// Creates an LLM provider based on the provided configuration.
+///
+/// Selects the appropriate provider (Anthropic or OpenAI) based on the config's
+/// `default_provider` setting or available API keys. Returns an error if no provider
+/// is configured or if the specified provider is unsupported.
 pub fn create_provider(config: &Config) -> Result<Box<dyn LlmProvider>> {
     let provider = config
         .default_provider

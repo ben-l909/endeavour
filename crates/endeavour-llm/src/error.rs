@@ -3,8 +3,8 @@ use thiserror::Error;
 /// Result type for LLM operations.
 pub type Result<T> = std::result::Result<T, LlmError>;
 
-#[derive(Error, Debug)]
 /// Errors that can occur during LLM operations.
+#[derive(Error, Debug)]
 pub enum LlmError {
     /// HTTP request error from the underlying HTTP client.
     #[error("HTTP error: {0}")]
@@ -20,13 +20,16 @@ pub enum LlmError {
     OpenAi(String),
     /// Anthropic API error with HTTP status and response body.
     #[error("Anthropic API error ({status}): {body}")]
-    AnthropicApi { /// HTTP status code.
-        status: u16, /// Response body text.
+    AnthropicApi {
+        /// HTTP status code.
+        status: u16,
+        /// Response body text.
         body: String,
     },
     /// Rate limit error with optional retry-after duration in seconds.
     #[error("Rate limited")]
-    RateLimited { /// Seconds to wait before retrying (if provided).
+    RateLimited {
+        /// Seconds to wait before retrying (if provided).
         retry_after: Option<u64>,
     },
     /// Authentication failed (invalid or missing API key).
