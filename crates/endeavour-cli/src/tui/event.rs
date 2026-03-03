@@ -12,6 +12,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Terminal;
 use tokio::select;
 use tokio::sync::mpsc;
+use tokio::sync::watch;
 use tokio::time;
 
 use super::app::{App, AppEvent};
@@ -20,15 +21,18 @@ pub async fn run_event_loop<B: Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     mut app_events: mpsc::Receiver<AppEvent>,
+    stream_cancel_signal: Option<watch::Sender<bool>>,
 ) -> io::Result<()> {
     let mut terminal_events = EventStream::new();
-    let mut tick = time::interval(Duration::from_millis(33));
+    let mut tick = time::interval(Duration::from_millis(16));
 
     while !app.should_quit() {
         select! {
             maybe_event = terminal_events.next() => {
                 match maybe_event {
-                    Some(Ok(event)) => handle_terminal_event(app, event),
+                    Some(Ok(event)) => {
+                        handle_terminal_event(app, event, stream_cancel_signal.as_ref())
+                    }
                     Some(Err(error)) => {
                         return Err(io::Error::other(format!("terminal event stream failed: {error}")));
                     }
@@ -41,7 +45,7 @@ pub async fn run_event_loop<B: Backend>(
                     None => app.reduce(AppEvent::Quit),
                 }
             }
-            _ = tick.tick() => {}
+            _ = tick.tick() => app.reduce(AppEvent::Tick)
         }
 
         if app.is_dirty() {
@@ -56,17 +60,26 @@ pub async fn run_event_loop<B: Backend>(
 
                 let panes = app.layout(area);
 
-                let history_lines = app.history_lines(panes.history.width);
-                let history_visible = panes.history.height as usize;
-                let history_start = history_lines.len().saturating_sub(history_visible);
-                let history_lines = history_lines
-                    .into_iter()
-                    .skip(history_start)
-                    .collect::<Vec<_>>();
+                let history_view = app.history_view(panes.history.width, panes.history.height);
                 frame.render_widget(
-                    Paragraph::new(Text::from(history_lines)).wrap(Wrap { trim: false }),
+                    Paragraph::new(Text::from(history_view.lines)).wrap(Wrap { trim: false }),
                     panes.history,
                 );
+                if let Some(indicator) = history_view.unseen_indicator {
+                    let indicator_area = Rect {
+                        x: panes.history.x,
+                        y: panes
+                            .history
+                            .y
+                            .saturating_add(panes.history.height.saturating_sub(1)),
+                        width: panes.history.width,
+                        height: 1,
+                    };
+                    frame.render_widget(
+                        Paragraph::new(indicator).alignment(Alignment::Right),
+                        indicator_area,
+                    );
+                }
 
                 let input_lines = app.input_lines(panes.input.width);
                 let input_visible = panes.input.height as usize;
@@ -89,20 +102,35 @@ pub async fn run_event_loop<B: Backend>(
     Ok(())
 }
 
-fn handle_terminal_event(app: &mut App, event: CrosstermEvent) {
+fn handle_terminal_event(
+    app: &mut App,
+    event: CrosstermEvent,
+    stream_cancel_signal: Option<&watch::Sender<bool>>,
+) {
     if let CrosstermEvent::Key(key) = event {
         if key.kind == KeyEventKind::Release {
             return;
         }
-        handle_key_event(app, key);
+        handle_key_event(app, key, stream_cancel_signal);
     }
 }
 
-fn handle_key_event(app: &mut App, key: KeyEvent) {
+fn handle_key_event(
+    app: &mut App,
+    key: KeyEvent,
+    stream_cancel_signal: Option<&watch::Sender<bool>>,
+) {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Char('c') => {
-                app.reduce(AppEvent::Quit);
+                if app.is_streaming() {
+                    if let Some(cancel_signal) = stream_cancel_signal {
+                        let _ = cancel_signal.send(true);
+                    }
+                    app.cancel_streaming();
+                } else {
+                    app.reduce(AppEvent::Quit);
+                }
                 return;
             }
             KeyCode::Char('d') => {
@@ -115,9 +143,18 @@ fn handle_key_event(app: &mut App, key: KeyEvent) {
 
     match key.code {
         KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => app.insert_newline(),
-        KeyCode::Enter => app.submit(),
+        KeyCode::Enter => {
+            if !app.toggle_focused_tool_call() {
+                app.submit();
+            }
+        }
         KeyCode::Backspace => app.backspace(),
         KeyCode::Esc => app.clear_input(),
+        KeyCode::Tab => app.focus_next_tool_call(),
+        KeyCode::PageUp => app.page_up(),
+        KeyCode::PageDown => app.page_down(),
+        KeyCode::Up => app.scroll_up_line(),
+        KeyCode::Down => app.scroll_down_line(),
         KeyCode::Char(ch) => app.insert_char(ch),
         _ => {}
     }
