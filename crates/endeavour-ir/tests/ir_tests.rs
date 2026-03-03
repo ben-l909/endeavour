@@ -8,10 +8,6 @@ fn v(id: u32) -> Expr {
     Expr::Value { id: ValueId(id) }
 }
 
-fn normalize_expr(expr: Expr) -> Expr {
-    expr
-}
-
 #[test]
 fn constructs_const_expr() {
     let expr = Expr::Const {
@@ -144,7 +140,9 @@ fn structurally_identical_exprs_are_equal() {
 }
 
 #[test]
+#[ignore = "Requires ENG-056 normalize module"]
 fn normalize_is_idempotent_for_distinct_expressions() {
+    // Requires ENG-056 normalize module
     let cases = vec![
         c(0, Width::W8),
         v(9),
@@ -172,11 +170,7 @@ fn normalize_is_idempotent_for_distinct_expressions() {
         },
     ];
 
-    for expr in cases {
-        let once = normalize_expr(expr.clone());
-        let twice = normalize_expr(once.clone());
-        assert_eq!(twice, once);
-    }
+    let _ = cases;
 }
 
 #[test]
