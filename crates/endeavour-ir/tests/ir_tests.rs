@@ -140,46 +140,41 @@ fn structurally_identical_exprs_are_equal() {
 }
 
 #[test]
-#[ignore = "Ignored: waiting for ENG-056 (normalize module) to merge"]
+#[ignore] // Ignored: waiting for ENG-056 (normalize module) to merge
 fn normalize_is_idempotent_for_distinct_expressions() {
-    let cases = vec![
-        c(0, Width::W8),
-        v(9),
-        Expr::Unary {
-            op: UnOp::Neg,
-            arg: Box::new(c(7, Width::W32)),
-            width: Width::W32,
-        },
-        Expr::Binary {
-            op: BinOp::Xor,
-            lhs: Box::new(v(1)),
-            rhs: Box::new(c(0xff, Width::W32)),
-            width: Width::W32,
-        },
-        Expr::Concat {
-            hi: Box::new(Expr::Slice {
-                src: Box::new(c(0x1234, Width::W16)),
-                lo: 8,
-                hi: 15,
-            }),
-            lo: Box::new(Expr::Load {
-                addr: Box::new(v(3)),
-                width: Width::W8,
-            }),
-        },
-    ];
-
-    #[cfg(any())]
-    {
-        for expr in cases {
-            let once = endeavour_ir::normalize::normalize_expr(expr.clone());
-            let twice = endeavour_ir::normalize::normalize_expr(once.clone());
-            assert_eq!(twice, once);
-        }
-    }
-
-    // Ignored: waiting for ENG-056 (normalize module) to merge
-    let _ = cases;
+    // When ENG-056 merges, un-ignore and use:
+    // use endeavour_ir::normalize::normalize_expr;
+    // let cases = vec![
+    //     c(0, Width::W8),
+    //     v(9),
+    //     Expr::Unary {
+    //         op: UnOp::Neg,
+    //         arg: Box::new(c(7, Width::W32)),
+    //         width: Width::W32,
+    //     },
+    //     Expr::Binary {
+    //         op: BinOp::Xor,
+    //         lhs: Box::new(v(1)),
+    //         rhs: Box::new(c(0xff, Width::W32)),
+    //         width: Width::W32,
+    //     },
+    //     Expr::Concat {
+    //         hi: Box::new(Expr::Slice {
+    //             src: Box::new(c(0x1234, Width::W16)),
+    //             lo: 8,
+    //             hi: 15,
+    //         }),
+    //         lo: Box::new(Expr::Load {
+    //             addr: Box::new(v(3)),
+    //             width: Width::W8,
+    //         }),
+    //     },
+    // ];
+    // for expr in cases {
+    //     let once = normalize_expr(&expr);
+    //     let twice = normalize_expr(&once);
+    //     assert_eq!(once, twice);
+    // }
 }
 
 #[test]
