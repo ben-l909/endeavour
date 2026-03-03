@@ -1,10 +1,11 @@
 [package]
 name = "endeavour-mba"
 version.workspace = true
-edition.workspace = true
+edition = "2021"
 license.workspace = true
 
 [dependencies]
+endeavour-ir = { path = "../endeavour-ir" }
 rayon.workspace = true
 thiserror.workspace = true
 
