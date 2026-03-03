@@ -1,3 +1,5 @@
+//! Endeavour Labs analysis CLI - binary instrumentation and analysis toolkit.
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -56,6 +58,8 @@ enum SessionsCommand {
     },
 }
 
+/// Entry point for the Endeavour CLI application.
+/// Initializes logging and dispatches to the appropriate command handler.
 fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
