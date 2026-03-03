@@ -31,6 +31,145 @@ pub struct Repl {
     runtime: Runtime,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ErrorCategory {
+    Input,
+    Connectivity,
+    Configuration,
+    Provider,
+    Internal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UserFacingError {
+    category: ErrorCategory,
+    summary: String,
+    detail: String,
+    recovery_hint: Option<String>,
+}
+
+impl UserFacingError {
+    fn new(
+        category: ErrorCategory,
+        summary: impl Into<String>,
+        detail: impl Into<String>,
+        recovery_hint: Option<String>,
+    ) -> Self {
+        Self {
+            category,
+            summary: summary.into(),
+            detail: detail.into(),
+            recovery_hint,
+        }
+    }
+
+    fn from_anyhow(err: &anyhow::Error) -> Self {
+        if let Some(session_input) = extract_invalid_session_id_input(err) {
+            return Self::new(
+                ErrorCategory::Input,
+                "invalid session ID",
+                format!("'{session_input}' is not a valid UUID"),
+                Some("run 'sessions' to list available session IDs".to_string()),
+            );
+        }
+
+        if contains_error_text(err, "no active session") {
+            return Self::new(
+                ErrorCategory::Input,
+                "no active session",
+                "run 'session new' to start a session",
+                None,
+            );
+        }
+
+        if contains_error_text(err, "method not found") || contains_error_text(err, "-32601") {
+            return Self::new(
+                ErrorCategory::Connectivity,
+                "IDA connection failed",
+                "Method not found (code -32601). Check that the IDA MCP plugin is loaded.",
+                None,
+            );
+        }
+
+        if contains_error_text(err, "connection refused") {
+            return Self::new(
+                ErrorCategory::Connectivity,
+                "IDA connection failed",
+                "connection refused. Is IDA running with the MCP plugin?",
+                None,
+            );
+        }
+
+        if let Some(io_error) = find_error_in_chain::<std::io::Error>(err) {
+            if io_error.kind() == std::io::ErrorKind::NotFound {
+                return Self::new(
+                    ErrorCategory::Input,
+                    "file not found",
+                    io_error.to_string(),
+                    Some("check the path and try again".to_string()),
+                );
+            }
+        }
+
+        if let Some(llm_error) = find_error_in_chain::<LlmError>(err) {
+            return match llm_error {
+                LlmError::Configuration(message) => Self::new(
+                    ErrorCategory::Configuration,
+                    "configuration error",
+                    message,
+                    None,
+                ),
+                LlmError::AuthFailed => Self::new(
+                    ErrorCategory::Provider,
+                    "provider authentication failed",
+                    "authentication failed",
+                    Some("check your API key and retry".to_string()),
+                ),
+                LlmError::RateLimited { .. } => Self::new(
+                    ErrorCategory::Provider,
+                    "provider request failed",
+                    "rate limit exceeded",
+                    Some("retry shortly or use a fallback provider".to_string()),
+                ),
+                LlmError::ContextWindowExceeded => Self::new(
+                    ErrorCategory::Provider,
+                    "context window exceeded",
+                    "input is too large for the selected model",
+                    Some("try a smaller function or a model with larger context".to_string()),
+                ),
+                _ => Self::new(
+                    ErrorCategory::Provider,
+                    "provider request failed",
+                    llm_error.to_string(),
+                    None,
+                ),
+            };
+        }
+
+        if find_error_in_chain::<IdaError>(err).is_some() {
+            return Self::new(
+                ErrorCategory::Connectivity,
+                "IDA request failed",
+                err.to_string(),
+                Some("run 'connect <host:port>' to reconnect".to_string()),
+            );
+        }
+
+        Self::new(
+            ErrorCategory::Internal,
+            "command failed",
+            err.to_string(),
+            None,
+        )
+    }
+}
+
+impl From<anyhow::Error> for UserFacingError {
+    fn from(value: anyhow::Error) -> Self {
+        Self::from_anyhow(&value)
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum ReplCommand {
     Help,
@@ -180,71 +319,128 @@ impl Repl {
                     ParsedLine::Empty => {}
                     ParsedLine::Command(ReplCommand::Help) => print_help(),
                     ParsedLine::Command(ReplCommand::Analyze(path)) => {
-                        self.handle_analyze(&path)?;
+                        match self.handle_analyze(&path) {
+                            Ok(()) => {}
+                            Err(err) => self.render_user_error(UserFacingError::from(err)),
+                        }
                     }
                     ParsedLine::Command(ReplCommand::Connect(target)) => {
-                        self.handle_connect(target.as_deref())?;
+                        match self.handle_connect(target.as_deref()) {
+                            Ok(()) => {}
+                            Err(err) => self.render_user_error(UserFacingError::from(err)),
+                        }
                     }
-                    ParsedLine::Command(ReplCommand::IdaStatus) => {
-                        self.handle_ida_status()?;
-                    }
+                    ParsedLine::Command(ReplCommand::IdaStatus) => match self.handle_ida_status() {
+                        Ok(()) => {}
+                        Err(err) => self.render_user_error(UserFacingError::from(err)),
+                    },
                     ParsedLine::Command(ReplCommand::Decompile(target)) => {
                         self.handle_decompile(&target);
                     }
                     ParsedLine::Command(ReplCommand::Explain(command)) => {
-                        self.handle_explain(&command)?;
+                        match self.handle_explain(&command) {
+                            Ok(()) => {}
+                            Err(err) => self.render_user_error(UserFacingError::from(err)),
+                        }
                     }
                     ParsedLine::Command(ReplCommand::Rename(command)) => {
-                        self.handle_rename(&command)?;
+                        match self.handle_rename(&command) {
+                            Ok(()) => {}
+                            Err(err) => self.render_user_error(UserFacingError::from(err)),
+                        }
                     }
-                    ParsedLine::Command(ReplCommand::Review) => {
-                        self.handle_review()?;
-                    }
+                    ParsedLine::Command(ReplCommand::Review) => match self.handle_review() {
+                        Ok(()) => {}
+                        Err(err) => self.render_user_error(UserFacingError::from(err)),
+                    },
                     ParsedLine::Command(ReplCommand::Comment(target, comment)) => {
-                        self.handle_comment(&target, &comment)?;
+                        match self.handle_comment(&target, &comment) {
+                            Ok(()) => {}
+                            Err(err) => self.render_user_error(UserFacingError::from(err)),
+                        }
                     }
                     ParsedLine::Command(ReplCommand::Callgraph(target, max_depth)) => {
-                        self.handle_callgraph(&target, max_depth)?;
+                        match self.handle_callgraph(&target, max_depth) {
+                            Ok(()) => {}
+                            Err(err) => self.render_user_error(UserFacingError::from(err)),
+                        }
                     }
                     ParsedLine::Command(ReplCommand::Search(pattern)) => {
-                        self.handle_search(&pattern)?;
+                        match self.handle_search(&pattern) {
+                            Ok(()) => {}
+                            Err(err) => self.render_user_error(UserFacingError::from(err)),
+                        }
                     }
-                    ParsedLine::Command(ReplCommand::Sessions) => {
-                        self.handle_sessions()?;
-                    }
+                    ParsedLine::Command(ReplCommand::Sessions) => match self.handle_sessions() {
+                        Ok(()) => {}
+                        Err(err) => self.render_user_error(UserFacingError::from(err)),
+                    },
                     ParsedLine::Command(ReplCommand::Session(id)) => {
-                        self.handle_session_switch(&id)?;
+                        match self.handle_session_switch(&id) {
+                            Ok(()) => {}
+                            Err(err) => self.render_user_error(UserFacingError::from(err)),
+                        }
                     }
-                    ParsedLine::Command(ReplCommand::Info) => {
-                        self.handle_info()?;
-                    }
-                    ParsedLine::Command(ReplCommand::Findings) => {
-                        self.handle_findings()?;
-                    }
+                    ParsedLine::Command(ReplCommand::Info) => match self.handle_info() {
+                        Ok(()) => {}
+                        Err(err) => self.render_user_error(UserFacingError::from(err)),
+                    },
+                    ParsedLine::Command(ReplCommand::Findings) => match self.handle_findings() {
+                        Ok(()) => {}
+                        Err(err) => self.render_user_error(UserFacingError::from(err)),
+                    },
                     ParsedLine::Command(ReplCommand::CacheStats) => {
-                        self.handle_cache_stats()?;
+                        match self.handle_cache_stats() {
+                            Ok(()) => {}
+                            Err(err) => self.render_user_error(UserFacingError::from(err)),
+                        }
                     }
                     ParsedLine::Command(ReplCommand::CacheClear) => {
-                        self.handle_cache_clear()?;
+                        match self.handle_cache_clear() {
+                            Ok(()) => {}
+                            Err(err) => self.render_user_error(UserFacingError::from(err)),
+                        }
                     }
                     ParsedLine::Command(ReplCommand::ConfigSet { key, value }) => {
-                        self.handle_config_set(&key, &value)?;
+                        match self.handle_config_set(&key, &value) {
+                            Ok(()) => {}
+                            Err(err) => self.render_user_error(UserFacingError::from(err)),
+                        }
                     }
                     ParsedLine::Command(ReplCommand::ConfigGet(key)) => {
-                        self.handle_config_get(&key)?;
+                        match self.handle_config_get(&key) {
+                            Ok(()) => {}
+                            Err(err) => self.render_user_error(UserFacingError::from(err)),
+                        }
                     }
                     ParsedLine::Command(ReplCommand::ConfigList) => {
-                        self.handle_config_list()?;
+                        match self.handle_config_list() {
+                            Ok(()) => {}
+                            Err(err) => self.render_user_error(UserFacingError::from(err)),
+                        }
                     }
                     ParsedLine::Command(ReplCommand::ShowTranscript(command)) => {
-                        self.handle_show_transcript(&command)?;
+                        match self.handle_show_transcript(&command) {
+                            Ok(()) => {}
+                            Err(err) => self.render_user_error(UserFacingError::from(err)),
+                        }
                     }
                     ParsedLine::Command(ReplCommand::Quit) => break,
                     ParsedLine::Unknown(cmd) => {
-                        println!("Unknown command: {cmd}. Type 'help' for available commands.");
+                        self.render_user_error(UserFacingError::new(
+                            ErrorCategory::Input,
+                            format!("unknown command '{cmd}'"),
+                            "type 'help' to see available commands",
+                            None,
+                        ));
                     }
                     ParsedLine::InvalidUsage(usage) => {
-                        println!("Usage: {usage}");
+                        self.render_user_error(UserFacingError::new(
+                            ErrorCategory::Input,
+                            "missing argument",
+                            format!("usage: {usage}"),
+                            None,
+                        ));
                     }
                 },
                 Signal::CtrlC => {}
@@ -272,6 +468,15 @@ impl Repl {
             DefaultPromptSegment::Basic(prompt_name),
             DefaultPromptSegment::Basic("◆".to_string()),
         )
+    }
+
+    fn render_user_error(&self, error: UserFacingError) {
+        let _ = error.category;
+        println!("✗ error: {}", error.summary);
+        println!("    ╰─ {}", error.detail);
+        if let Some(hint) = error.recovery_hint {
+            println!("    ╰─ hint: {hint}");
+        }
     }
 
     fn handle_analyze(&mut self, input_path: &str) -> Result<()> {
@@ -1539,6 +1744,27 @@ fn print_error(summary: &str, details: &[&str]) {
             println!("       {detail}");
         }
     }
+}
+
+fn contains_error_text(err: &anyhow::Error, needle: &str) -> bool {
+    let needle = needle.to_ascii_lowercase();
+    err.chain()
+        .any(|cause| cause.to_string().to_ascii_lowercase().contains(&needle))
+}
+
+fn extract_invalid_session_id_input(err: &anyhow::Error) -> Option<String> {
+    const PREFIX: &str = "invalid session id: ";
+    for cause in err.chain() {
+        let message = cause.to_string();
+        if let Some(input) = message.strip_prefix(PREFIX) {
+            return Some(input.trim().to_string());
+        }
+    }
+    None
+}
+
+fn find_error_in_chain<T: std::error::Error + 'static>(err: &anyhow::Error) -> Option<&T> {
+    err.chain().find_map(|cause| cause.downcast_ref::<T>())
 }
 
 fn read_prompt(prompt: &str) -> Result<String> {
