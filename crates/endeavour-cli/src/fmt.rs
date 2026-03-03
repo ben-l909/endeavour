@@ -1,3 +1,5 @@
+//! Formatting utilities for CLI output including colors, tables, and semantic text styling.
+
 use std::ffi::OsString;
 
 use owo_colors::OwoColorize;
@@ -5,38 +7,62 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Brand and semantic palette definitions from CLI standards.
 pub mod palette {
+    /// Amber color: RGB(212, 160, 74) - primary brand color.
     pub const AMBER: (u8, u8, u8) = (212, 160, 74);
+    /// ANSI 256 color code for amber.
     pub const AMBER_ANSI256: u8 = 179;
+    /// Slate color: RGB(110, 136, 152) - neutral secondary color.
     pub const SLATE: (u8, u8, u8) = (110, 136, 152);
+    /// ANSI 256 color code for slate.
     pub const SLATE_ANSI256: u8 = 66;
+    /// Teal color: RGB(74, 158, 142) - accent color.
     pub const TEAL: (u8, u8, u8) = (74, 158, 142);
+    /// ANSI 256 color code for teal.
     pub const TEAL_ANSI256: u8 = 72;
 
+    /// Vermillion color: RGB(212, 91, 78) - error/alert color.
     pub const VERMILLION: (u8, u8, u8) = (212, 91, 78);
+    /// ANSI 256 color code for vermillion.
     pub const VERMILLION_ANSI256: u8 = 167;
+    /// Copper color: RGB(212, 138, 74) - warning color.
     pub const COPPER: (u8, u8, u8) = (212, 138, 74);
+    /// ANSI 256 color code for copper.
     pub const COPPER_ANSI256: u8 = 173;
+    /// Sage color: RGB(91, 158, 107) - success color.
     pub const SAGE: (u8, u8, u8) = (91, 158, 107);
+    /// ANSI 256 color code for sage.
     pub const SAGE_ANSI256: u8 = 71;
+    /// Steel color: RGB(91, 143, 212) - info color.
     pub const STEEL: (u8, u8, u8) = (91, 143, 212);
+    /// ANSI 256 color code for steel.
     pub const STEEL_ANSI256: u8 = 68;
+    /// Ash color: RGB(120, 120, 120) - dark neutral.
     pub const ASH: (u8, u8, u8) = (120, 120, 120);
+    /// ANSI 256 color code for ash.
     pub const ASH_ANSI256: u8 = 243;
 
+    /// Chalk color: RGB(200, 200, 200) - light neutral.
     pub const CHALK: (u8, u8, u8) = (200, 200, 200);
+    /// ANSI 256 color code for chalk.
     pub const CHALK_ANSI256: u8 = 251;
+    /// Dim color: RGB(90, 90, 90) - muted text.
     pub const DIM: (u8, u8, u8) = (90, 90, 90);
+    /// ANSI 256 color code for dim.
     pub const DIM_ANSI256: u8 = 240;
+    /// Faint color: RGB(58, 58, 58) - very muted text.
     pub const FAINT: (u8, u8, u8) = (58, 58, 58);
+    /// ANSI 256 color code for faint.
     pub const FAINT_ANSI256: u8 = 236;
 }
 
+/// Horizontal text alignment for table cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Align {
     Left,
     Right,
 }
 
+/// Status indicator for semantic output (pass, fail, warn, info).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Pass,
@@ -45,6 +71,7 @@ pub enum Status {
     Info,
 }
 
+/// Visual weight of separator lines (heavy, standard, light).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Separator {
     Heavy,
@@ -52,6 +79,7 @@ pub enum Separator {
     Light,
 }
 
+/// A column definition for table rendering with title, width, and alignment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Column {
     title: String,
