@@ -15,6 +15,9 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_ANTHROPIC_MODEL: &str = "claude-3-5-sonnet-20241022";
 
 #[derive(Clone, Debug)]
+/// Anthropic Claude API provider.
+///
+/// Implements the LLM provider interface for Anthropic's Claude models.
 pub struct AnthropicProvider {
     client: Client,
     api_key: String,
@@ -22,6 +25,7 @@ pub struct AnthropicProvider {
 }
 
 impl AnthropicProvider {
+    /// Creates a new Anthropic provider with the given API key.
     pub fn new(api_key: String) -> Self {
         Self {
             client: Client::new(),
@@ -30,6 +34,7 @@ impl AnthropicProvider {
         }
     }
 
+    /// Sets a model override for all requests from this provider.
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model_override = Some(model.into());
         self

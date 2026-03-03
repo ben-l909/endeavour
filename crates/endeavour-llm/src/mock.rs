@@ -9,23 +9,32 @@ use crate::provider::{LlmProvider, ProviderStream};
 use crate::types::{CompletionRequest, CompletionResponse, StreamChunk};
 
 #[derive(Debug)]
+/// A mock response that can be queued for testing.
 pub enum MockResponse {
+    /// A complete (non-streaming) response.
     Completion(Result<CompletionResponse>),
+    /// A streaming response as a sequence of chunks.
     Stream(Result<Vec<StreamChunk>>),
 }
 
 #[derive(Clone, Debug)]
+/// A mock LLM provider for testing.
+///
+/// Queues predefined responses that are returned in order when completion
+/// or streaming methods are called.
 pub struct MockProvider {
     responses: Arc<Mutex<VecDeque<MockResponse>>>,
 }
 
 impl MockProvider {
+    /// Creates a new mock provider with the given queued responses.
     pub fn new(responses: Vec<MockResponse>) -> Self {
         Self {
             responses: Arc::new(Mutex::new(responses.into_iter().collect())),
         }
     }
 
+    /// Enqueues an additional response to be returned on the next request.
     pub fn enqueue(&self, response: MockResponse) -> Result<()> {
         let mut queue = self.responses.lock().map_err(|_| LlmError::ChannelClosed)?;
         queue.push_back(response);

@@ -18,12 +18,16 @@ use crate::types::{CompletionRequest, CompletionResponse, Message, Role, StreamC
 const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini";
 
 #[derive(Clone, Debug)]
+/// OpenAI API provider.
+///
+/// Implements the LLM provider interface for OpenAI's GPT models.
 pub struct OpenAiProvider {
     client: Client<OpenAIConfig>,
     model_override: Option<String>,
 }
 
 impl OpenAiProvider {
+    /// Creates a new OpenAI provider with the given API key.
     pub fn new(api_key: String) -> Self {
         let config = OpenAIConfig::new().with_api_key(api_key);
         Self {
@@ -32,6 +36,7 @@ impl OpenAiProvider {
         }
     }
 
+    /// Sets a model override for all requests from this provider.
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model_override = Some(model.into());
         self
