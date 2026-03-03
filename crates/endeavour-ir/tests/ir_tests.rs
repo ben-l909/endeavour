@@ -140,9 +140,8 @@ fn structurally_identical_exprs_are_equal() {
 }
 
 #[test]
-#[ignore = "Requires ENG-056 normalize module"]
+#[ignore = "Ignored: waiting for ENG-056 (normalize module) to merge"]
 fn normalize_is_idempotent_for_distinct_expressions() {
-    // Requires ENG-056 normalize module
     let cases = vec![
         c(0, Width::W8),
         v(9),
@@ -170,6 +169,16 @@ fn normalize_is_idempotent_for_distinct_expressions() {
         },
     ];
 
+    #[cfg(any())]
+    {
+        for expr in cases {
+            let once = endeavour_ir::normalize::normalize_expr(expr.clone());
+            let twice = endeavour_ir::normalize::normalize_expr(once.clone());
+            assert_eq!(twice, once);
+        }
+    }
+
+    // Ignored: waiting for ENG-056 (normalize module) to merge
     let _ = cases;
 }
 
