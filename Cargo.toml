@@ -1,0 +1,36 @@
+[workspace]
+members = [
+    "crates/endeavour-cli",
+    "crates/endeavour-core",
+    "crates/endeavour-ir",
+    "crates/endeavour-mba",
+    "crates/endeavour-ida",
+    "crates/endeavour-llm",
+    "crates/endeavour-frida",
+    "crates/endeavour-synthesis",
+    "crates/endeavour-trace",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+clap = { version = "4", features = ["derive"] }
+reedline = "0.38"
+rusqlite = { version = "0.32", features = ["bundled"] }
+tokio = { version = "1", features = ["full"] }
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+goblin = "0.9"
+memmap2 = "0.9"
+thiserror = "2"
+anyhow = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+reqwest = { version = "0.12", features = ["json"] }
+async-trait = "0.1"

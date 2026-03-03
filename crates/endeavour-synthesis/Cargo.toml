@@ -1,0 +1,9 @@
+[package]
+name = "endeavour-synthesis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+goblin.workspace = true
+serde.workspace = true

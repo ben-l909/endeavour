@@ -1,0 +1,20 @@
+[package]
+name = "endeavour-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "endeavour"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+reedline.workspace = true
+endeavour-core = { path = "../endeavour-core" }
+
+[dev-dependencies]
+assert_cmd = "2"
