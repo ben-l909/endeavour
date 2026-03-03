@@ -12,6 +12,7 @@ mod error;
 mod ida_tool_executor;
 /// Mock provider for testing LLM integrations.
 pub mod mock;
+mod oauth_refresh;
 mod openai;
 mod provider;
 mod router;

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::{LlmError, Result};
+use crate::oauth_refresh::{credential_for_request, CredentialMethod, ProviderAuth};
 use crate::provider::{LlmProvider, ProviderStream};
 use crate::types::{
     CompletionRequest, CompletionResponse, Role, StopReason, StreamChunk, StreamChunkKind,
@@ -15,6 +16,7 @@ use crate::types::{
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
 const DEFAULT_ANTHROPIC_MODEL: &str = "claude-3-5-sonnet-20241022";
 
 #[derive(Clone, Debug)]
@@ -118,14 +120,27 @@ impl AnthropicProvider {
     }
 
     async fn post(&self, payload: &AnthropicRequest) -> Result<reqwest::Response> {
-        let response = self
+        let credential =
+            credential_for_request(ProviderAuth::Anthropic, &self.api_key, &self.client)
+                .await
+                .map_err(|err| match err {
+                    LlmError::Configuration(_) => err,
+                    _ => LlmError::AuthFailed,
+                })?;
+
+        let mut request = self
             .client
             .post(ANTHROPIC_API_URL)
-            .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
-            .json(payload)
-            .send()
-            .await?;
+            .json(payload);
+        request = match credential.method {
+            CredentialMethod::ApiKey => request.header("x-api-key", credential.token),
+            CredentialMethod::OAuth => request
+                .header("Authorization", format!("Bearer {}", credential.token))
+                .header("anthropic-beta", ANTHROPIC_OAUTH_BETA),
+        };
+
+        let response = request.send().await?;
 
         if response.status().is_success() {
             return Ok(response);
