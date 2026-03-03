@@ -5,9 +5,17 @@ edition = "2021"
 license.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+capstone = "0.14.0"
+endeavour-ida = { path = "../endeavour-ida" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+
+[features]
+default = []
+ida = []
 
 [lints]
 workspace = true
