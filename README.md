@@ -10,7 +10,7 @@
 
 <h1>What is this</h1>
 <p>
-  Endeavour is a binary instrumentation toolkit that combines the power of LLMs with traditional methods (MBA simplification, IR lifting) to help reverse engineers understand obfuscated code.
+  Endeavour is a binary analysis toolkit that combines the power of LLMs with traditional methods (MBA simplification, IR lifting) to help reverse engineers understand obfuscated code.
   <br /><br />
   This project is <b>more than that</b>, though - it's a proof of concept showing that LLMs can replace much of a modern corporation’s workflow, from QA testing and product design to engineering and releases.
   <br /><br />
