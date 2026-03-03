@@ -56,17 +56,26 @@ pub async fn run_event_loop<B: Backend>(
 
                 let panes = app.layout(area);
 
-                let history_lines = app.history_lines(panes.history.width);
-                let history_visible = panes.history.height as usize;
-                let history_start = history_lines.len().saturating_sub(history_visible);
-                let history_lines = history_lines
-                    .into_iter()
-                    .skip(history_start)
-                    .collect::<Vec<_>>();
+                let history_view = app.history_view(panes.history.width, panes.history.height);
                 frame.render_widget(
-                    Paragraph::new(Text::from(history_lines)).wrap(Wrap { trim: false }),
+                    Paragraph::new(Text::from(history_view.lines)).wrap(Wrap { trim: false }),
                     panes.history,
                 );
+                if let Some(indicator) = history_view.unseen_indicator {
+                    let indicator_area = Rect {
+                        x: panes.history.x,
+                        y: panes
+                            .history
+                            .y
+                            .saturating_add(panes.history.height.saturating_sub(1)),
+                        width: panes.history.width,
+                        height: 1,
+                    };
+                    frame.render_widget(
+                        Paragraph::new(indicator).alignment(Alignment::Right),
+                        indicator_area,
+                    );
+                }
 
                 let input_lines = app.input_lines(panes.input.width);
                 let input_visible = panes.input.height as usize;
@@ -118,6 +127,10 @@ fn handle_key_event(app: &mut App, key: KeyEvent) {
         KeyCode::Enter => app.submit(),
         KeyCode::Backspace => app.backspace(),
         KeyCode::Esc => app.clear_input(),
+        KeyCode::PageUp => app.page_up(),
+        KeyCode::PageDown => app.page_down(),
+        KeyCode::Up => app.scroll_up_line(),
+        KeyCode::Down => app.scroll_down_line(),
         KeyCode::Char(ch) => app.insert_char(ch),
         _ => {}
     }
