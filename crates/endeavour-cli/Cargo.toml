@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+z3-verifier = ["endeavour-mba/z3-verifier"]
+
 [[bin]]
 name = "endeavour"
 path = "src/main.rs"
@@ -32,6 +36,7 @@ endeavour-core = { path = "../endeavour-core" }
 endeavour-ida = { path = "../endeavour-ida" }
 endeavour-llm = { path = "../endeavour-llm" }
 endeavour-ir = { path = "../endeavour-ir" }
+endeavour-mba = { path = "../endeavour-mba", default-features = false }
 
 [dev-dependencies]
 assert_cmd = "2"

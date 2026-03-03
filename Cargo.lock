@@ -660,6 +660,7 @@ dependencies = [
  "endeavour-ida",
  "endeavour-ir",
  "endeavour-llm",
+ "endeavour-mba",
  "futures-util",
  "owo-colors",
  "rand 0.9.2",

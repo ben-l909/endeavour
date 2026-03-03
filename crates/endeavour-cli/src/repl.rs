@@ -36,6 +36,7 @@ enum ReplCommand {
     Review,
     Comment(String, String),
     Callgraph(String, Option<u32>),
+    DetectMba(String),
     Search(String),
     Sessions,
     Session(String),
@@ -216,6 +217,11 @@ impl Repl {
             }
             ParsedLine::Command(ReplCommand::Callgraph(target, max_depth)) => {
                 if let Err(e) = commands::handle_callgraph(self, &target, max_depth) {
+                    eprintln!("✗ error: {e}");
+                }
+            }
+            ParsedLine::Command(ReplCommand::DetectMba(target)) => {
+                if let Err(e) = commands::handle_detect_mba(self, &target) {
                     eprintln!("✗ error: {e}");
                 }
             }
@@ -413,6 +419,18 @@ fn parse_command(line: &str) -> ParsedLine {
                 ParsedLine::Command(ReplCommand::Callgraph(target.to_string(), depth))
             }
         }
+        "detect-mba" => match tokens.next() {
+            Some(target) if tokens.next().is_none() => {
+                ParsedLine::Command(ReplCommand::DetectMba(target.to_string()))
+            }
+            _ => ParsedLine::InvalidUsage("detect-mba <hex_address>"),
+        },
+        "detect" => match (tokens.next(), tokens.next(), tokens.next()) {
+            (Some("mba"), Some(target), None) => {
+                ParsedLine::Command(ReplCommand::DetectMba(target.to_string()))
+            }
+            _ => ParsedLine::InvalidUsage("detect mba <hex_address>"),
+        },
         "search" => {
             let pattern: Vec<&str> = tokens.collect();
             if pattern.is_empty() {
@@ -535,6 +553,7 @@ fn print_help() {
     println!("  review               Review queued medium-confidence suggestions");
     println!("  comment <addr> <text...>  Set comment at address");
     println!("  callgraph <addr> [depth]  Show call graph tree (default depth: 3)");
+    println!("  detect-mba <addr>    Run MBA detection pipeline for a function");
     println!("  search <pattern>     Search strings with regex pattern");
     println!("  sessions             List all sessions");
     println!("  session new          Create a new session (guided)");
@@ -594,6 +613,14 @@ mod tests {
         assert_eq!(
             parse_command("search objc_msgSend"),
             ParsedLine::Command(ReplCommand::Search("objc_msgSend".to_string()))
+        );
+        assert_eq!(
+            parse_command("detect-mba 0x401000"),
+            ParsedLine::Command(ReplCommand::DetectMba("0x401000".to_string()))
+        );
+        assert_eq!(
+            parse_command("detect mba 0x401000"),
+            ParsedLine::Command(ReplCommand::DetectMba("0x401000".to_string()))
         );
         assert_eq!(
             parse_command("cache stats"),

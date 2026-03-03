@@ -191,6 +191,11 @@ pub fn info(text: impl AsRef<str>) -> String {
     style(text.as_ref(), palette::STEEL, true)
 }
 
+/// Semantic dim/muted text.
+pub fn dim(text: impl AsRef<str>) -> String {
+    style(text.as_ref(), palette::DIM, false)
+}
+
 /// Formats an address with standards-compliant lowercase hex and zero padding.
 pub fn format_addr(addr: u64) -> String {
     if addr <= u32::MAX as u64 {
