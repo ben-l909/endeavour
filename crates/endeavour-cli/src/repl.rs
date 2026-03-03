@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use endeavour_core::{loader, Session, SessionStore};
+use endeavour_core::store::SessionStore;
+use endeavour_core::{loader, Session};
 use reedline::{DefaultPrompt, DefaultPromptSegment, FileBackedHistory, Reedline, Signal};
 
 const HISTORY_CAPACITY: usize = 500;
