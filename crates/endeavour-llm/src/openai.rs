@@ -18,6 +18,7 @@ use futures_util::{stream, StreamExt};
 use serde_json::Value;
 
 use crate::error::{LlmError, Result};
+use crate::oauth_refresh::{credential_for_request, ProviderAuth};
 use crate::provider::{LlmProvider, ProviderStream};
 use crate::types::{
     CompletionRequest, CompletionResponse, Message, Role, StopReason, StreamChunk, StreamChunkKind,
@@ -31,16 +32,15 @@ const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini";
 ///
 /// Implements the LLM provider interface for OpenAI's GPT models.
 pub struct OpenAiProvider {
-    client: Client<OpenAIConfig>,
+    api_key: String,
     model_override: Option<String>,
 }
 
 impl OpenAiProvider {
     /// Creates a new OpenAI provider with the given API key.
     pub fn new(api_key: String) -> Self {
-        let config = OpenAIConfig::new().with_api_key(api_key);
         Self {
-            client: Client::with_config(config),
+            api_key,
             model_override: None,
         }
     }
@@ -153,6 +153,18 @@ impl OpenAiProvider {
         builder
             .build()
             .map_err(|err| LlmError::OpenAi(err.to_string()))
+    }
+
+    async fn openai_client_for_request(&self) -> Result<Client<OpenAIConfig>> {
+        let credential =
+            credential_for_request(ProviderAuth::OpenAi, &self.api_key, &reqwest::Client::new())
+                .await
+                .map_err(|err| match err {
+                    LlmError::Configuration(_) => err,
+                    _ => LlmError::AuthFailed,
+                })?;
+        let config = OpenAIConfig::new().with_api_key(credential.token);
+        Ok(Client::with_config(config))
     }
 }
 
@@ -368,8 +380,8 @@ fn process_stream_chunk(
 impl LlmProvider for OpenAiProvider {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse> {
         let wire_request = self.build_request(&request)?;
-        let response = self
-            .client
+        let client = self.openai_client_for_request().await?;
+        let response = client
             .chat()
             .create(wire_request)
             .await
@@ -402,8 +414,8 @@ impl LlmProvider for OpenAiProvider {
         wire_request.stream_options = Some(ChatCompletionStreamOptions {
             include_usage: true,
         });
-        let stream = self
-            .client
+        let client = self.openai_client_for_request().await?;
+        let stream = client
             .chat()
             .create_stream(wire_request)
             .await
