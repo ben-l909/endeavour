@@ -726,13 +726,10 @@ dependencies = [
 name = "endeavour-ir"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "capstone",
- "endeavour-ida",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
- "tokio",
 ]
 
 [[package]]

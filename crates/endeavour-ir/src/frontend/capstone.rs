@@ -371,3 +371,49 @@ fn trunc_to_width(value: i128, width: Width) -> u128 {
 fn is_zero_reg(reg: &str) -> bool {
     matches!(reg, "xzr" | "wzr")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{CapstoneFrontend, InstructionArch};
+    use crate::ir::{BinOp, Expr, Stmt, ValueId, Width};
+
+    #[test]
+    fn lifts_arm64_add_register_form() {
+        let frontend = CapstoneFrontend::new();
+        let bytes = [0x20_u8, 0x00, 0x02, 0x8b];
+        let stmts = frontend.lift_bytes(&bytes, InstructionArch::Arm64);
+
+        assert_eq!(
+            stmts,
+            vec![Stmt::Assign {
+                dst: ValueId(2),
+                expr: Expr::Binary {
+                    op: BinOp::Add,
+                    lhs: Box::new(Expr::Value { id: ValueId(0) }),
+                    rhs: Box::new(Expr::Value { id: ValueId(1) }),
+                    width: Width::W64,
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn lifts_x86_64_add_register_form() {
+        let frontend = CapstoneFrontend::new();
+        let bytes = [0x48_u8, 0x01, 0xd8];
+        let stmts = frontend.lift_bytes(&bytes, InstructionArch::X86_64);
+
+        assert_eq!(
+            stmts,
+            vec![Stmt::Assign {
+                dst: ValueId(2),
+                expr: Expr::Binary {
+                    op: BinOp::Add,
+                    lhs: Box::new(Expr::Value { id: ValueId(0) }),
+                    rhs: Box::new(Expr::Value { id: ValueId(1) }),
+                    width: Width::W64,
+                },
+            }]
+        );
+    }
+}
