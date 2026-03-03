@@ -493,4 +493,47 @@ mod tests {
         assert_unary_stmt(&stmts[1], UnOp::BitNot);
         assert_unary_stmt(&stmts[2], UnOp::Neg);
     }
+
+    #[test]
+    fn lifts_arm64_mov_instruction() {
+        let frontend = CapstoneFrontend::new();
+        // MOV X0, X1
+        let bytes = [0x20_u8, 0x00, 0x00, 0xaa];
+        let stmts = frontend.lift_bytes(&bytes, InstructionArch::Arm64);
+
+        assert_eq!(stmts.len(), 1);
+        assert_mov_stmt(&stmts[0]);
+    }
+
+    #[test]
+    fn lifts_arm64_shift_operations() {
+        let frontend = CapstoneFrontend::new();
+        // LSL X0, X1, #1 and LSR X0, X1, #1
+        let bytes = [
+            0x20_u8, 0x04, 0x01, 0xd3, // LSL X0, X1, #1
+            0x20_u8, 0x04, 0x41, 0xd3, // LSR X0, X1, #1
+        ];
+        let stmts = frontend.lift_bytes(&bytes, InstructionArch::Arm64);
+
+        assert_eq!(stmts.len(), 2);
+        assert_binary_stmt(&stmts[0], BinOp::Shl);
+        assert_binary_stmt(&stmts[1], BinOp::LShr);
+    }
+
+    #[test]
+    fn lifts_arm64_unary_operations() {
+        let frontend = CapstoneFrontend::new();
+        // MVN X0, X1 and NEG X0, X1
+        let bytes = [
+            0x20_u8, 0x00, 0x02, 0xaa, // MOV X0, X1 (for baseline)
+            0x20_u8, 0x00, 0x22, 0xaa, // MVN X0, X1
+            0x20_u8, 0x00, 0x00, 0xcb, // NEG X0, X1
+        ];
+        let stmts = frontend.lift_bytes(&bytes, InstructionArch::Arm64);
+
+        assert_eq!(stmts.len(), 3);
+        assert_mov_stmt(&stmts[0]);
+        assert_unary_stmt(&stmts[1], UnOp::BitNot);
+        assert_unary_stmt(&stmts[2], UnOp::Neg);
+    }
 }
