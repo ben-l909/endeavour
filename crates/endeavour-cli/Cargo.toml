@@ -17,8 +17,17 @@ reedline.workspace = true
 owo-colors.workspace = true
 unicode-width.workspace = true
 tokio.workspace = true
+futures-util.workspace = true
 uuid.workspace = true
 serde_json.workspace = true
+serde.workspace = true
+reqwest.workspace = true
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
+base64 = "0.22"
+sha2 = "0.10"
+rand = "0.9"
 endeavour-core = { path = "../endeavour-core" }
 endeavour-ida = { path = "../endeavour-ida" }
 endeavour-llm = { path = "../endeavour-llm" }
@@ -27,6 +36,7 @@ endeavour-llm = { path = "../endeavour-llm" }
 assert_cmd = "2"
 async-trait.workspace = true
 serde_json.workspace = true
+tempfile = "3"
 
 [lints]
 workspace = true

@@ -161,3 +161,51 @@ pub struct Session {
     /// Human-readable session name.
     pub name: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReviewQueueRecord {
+    pub id: uuid::Uuid,
+    pub session_id: uuid::Uuid,
+    pub kind: String,
+    pub function_addr: u64,
+    pub target_addr: Option<u64>,
+    pub current_name: String,
+    pub proposed_value: String,
+    pub confidence: f64,
+    pub status: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NewReviewQueueRecord {
+    pub kind: String,
+    pub function_addr: u64,
+    pub target_addr: Option<u64>,
+    pub current_name: String,
+    pub proposed_value: String,
+    pub confidence: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TranscriptRecord {
+    pub id: uuid::Uuid,
+    pub session_id: uuid::Uuid,
+    pub turn_number: u32,
+    pub role: String,
+    pub timestamp: String,
+    pub content_json: String,
+    pub usage_json: Option<String>,
+    pub state: String,
+    pub tool_calls_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NewTranscriptRecord {
+    pub turn_number: u32,
+    pub role: String,
+    pub timestamp: String,
+    pub content_json: String,
+    pub usage_json: Option<String>,
+    pub state: String,
+    pub tool_calls_json: Option<String>,
+}

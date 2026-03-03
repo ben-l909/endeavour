@@ -5,6 +5,17 @@ use serde::{Deserialize, Serialize};
 const APP_DIRECTORY: &str = ".endeavour";
 const CONFIG_FILE_NAME: &str = "config.toml";
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct RoutingConfig {
+    pub deep_analysis_model: Option<String>,
+    pub code_generation_model: Option<String>,
+    pub fast_rename_model: Option<String>,
+    pub summarize_model: Option<String>,
+    pub explain_model: Option<String>,
+    pub chat_model: Option<String>,
+}
+
 /// Errors that can occur during configuration operations.
 #[derive(thiserror::Error, Debug)]
 pub enum ConfigError {
@@ -46,6 +57,7 @@ pub struct Config {
     pub openai_api_key: Option<String>,
     /// Default LLM provider ("anthropic" or "openai").
     pub default_provider: Option<String>,
+    pub routing: RoutingConfig,
 }
 
 impl Config {

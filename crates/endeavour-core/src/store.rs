@@ -3,7 +3,10 @@ use std::path::Path;
 use rusqlite::{params, types::Type, Connection, OptionalExtension, Row};
 use uuid::Uuid;
 
-use crate::{Error, Finding, FindingKind, Result, Session};
+use crate::{
+    Error, Finding, FindingKind, NewReviewQueueRecord, NewTranscriptRecord, Result,
+    ReviewQueueRecord, Session, TranscriptRecord,
+};
 
 /// SQLite-backed session and artifact store.
 pub struct SessionStore {
@@ -241,6 +244,156 @@ impl SessionStore {
             methods,
         })
     }
+
+    pub fn add_review_queue_entry(
+        &self,
+        session_id: Uuid,
+        record: &NewReviewQueueRecord,
+    ) -> Result<()> {
+        let id = Uuid::new_v4();
+        let created_at = rfc3339_now(&self.conn)?;
+
+        self.conn
+            .execute(
+                "INSERT INTO review_queue (id, session_id, kind, function_addr, target_addr, current_name, proposed_value, confidence, status, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9)",
+                params![
+                    id.to_string(),
+                    session_id.to_string(),
+                    &record.kind,
+                    address_to_i64(record.function_addr)?,
+                    record.target_addr.map(address_to_i64).transpose()?,
+                    &record.current_name,
+                    &record.proposed_value,
+                    record.confidence,
+                    created_at,
+                ],
+            )
+            .map_err(map_db_error)?;
+
+        Ok(())
+    }
+
+    pub fn list_pending_review_queue(&self, session_id: Uuid) -> Result<Vec<ReviewQueueRecord>> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT id, session_id, kind, function_addr, target_addr, current_name, proposed_value, confidence, status, created_at
+                 FROM review_queue
+                 WHERE session_id = ?1 AND status = 'pending'
+                 ORDER BY created_at ASC",
+            )
+            .map_err(map_db_error)?;
+
+        let rows = statement
+            .query_map(params![session_id.to_string()], review_queue_from_row)
+            .map_err(map_db_error)?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(map_db_error)
+    }
+
+    pub fn update_review_queue_status(&self, id: Uuid, status: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE review_queue SET status = ?1 WHERE id = ?2",
+                params![status, id.to_string()],
+            )
+            .map_err(map_db_error)?;
+        Ok(())
+    }
+
+    pub fn update_all_review_queue_status(
+        &self,
+        session_id: Uuid,
+        from_status: &str,
+        to_status: &str,
+    ) -> Result<usize> {
+        self.conn
+            .execute(
+                "UPDATE review_queue SET status = ?1 WHERE session_id = ?2 AND status = ?3",
+                params![to_status, session_id.to_string(), from_status],
+            )
+            .map_err(map_db_error)
+    }
+
+    pub fn add_transcript_entries(
+        &self,
+        session_id: Uuid,
+        entries: &[NewTranscriptRecord],
+    ) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let mut statement = self
+            .conn
+            .prepare(
+                "INSERT INTO transcript_entries (id, session_id, turn_number, role, timestamp, content_json, usage_json, state, tool_calls_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            )
+            .map_err(map_db_error)?;
+
+        for entry in entries {
+            statement
+                .execute(params![
+                    Uuid::new_v4().to_string(),
+                    session_id.to_string(),
+                    i64::from(entry.turn_number),
+                    &entry.role,
+                    &entry.timestamp,
+                    &entry.content_json,
+                    entry.usage_json.as_deref(),
+                    &entry.state,
+                    entry.tool_calls_json.as_deref(),
+                ])
+                .map_err(map_db_error)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn get_transcript_entries(
+        &self,
+        session_id: Uuid,
+        turn: Option<u32>,
+    ) -> Result<Vec<TranscriptRecord>> {
+        let base = "SELECT id, session_id, turn_number, role, timestamp, content_json, usage_json, state, tool_calls_json
+                    FROM transcript_entries
+                    WHERE session_id = ?1";
+
+        let mut entries = Vec::new();
+        if let Some(turn_number) = turn {
+            let mut statement = self
+                .conn
+                .prepare(&format!(
+                    "{base} AND turn_number = ?2 ORDER BY turn_number ASC, id ASC"
+                ))
+                .map_err(map_db_error)?;
+            let rows = statement
+                .query_map(
+                    params![session_id.to_string(), i64::from(turn_number)],
+                    transcript_from_row,
+                )
+                .map_err(map_db_error)?;
+            for row in rows {
+                entries.push(row.map_err(map_db_error)?);
+            }
+        } else {
+            let mut statement = self
+                .conn
+                .prepare(&format!("{base} ORDER BY turn_number ASC, id ASC"))
+                .map_err(map_db_error)?;
+            let rows = statement
+                .query_map(params![session_id.to_string()], transcript_from_row)
+                .map_err(map_db_error)?;
+            for row in rows {
+                entries.push(row.map_err(map_db_error)?);
+            }
+        }
+
+        Ok(entries)
+    }
 }
 
 fn run_migrations(conn: &Connection) -> Result<()> {
@@ -278,6 +431,39 @@ fn run_migrations(conn: &Connection) -> Result<()> {
 
         CREATE UNIQUE INDEX IF NOT EXISTS idx_ida_cache_lookup
             ON ida_cache(session_id, method, address);
+
+        CREATE TABLE IF NOT EXISTS review_queue (
+            id TEXT PRIMARY KEY NOT NULL,
+            session_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            function_addr INTEGER NOT NULL,
+            target_addr INTEGER,
+            current_name TEXT NOT NULL,
+            proposed_value TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_review_queue_session_status
+            ON review_queue(session_id, status, created_at);
+
+        CREATE TABLE IF NOT EXISTS transcript_entries (
+            id TEXT PRIMARY KEY NOT NULL,
+            session_id TEXT NOT NULL,
+            turn_number INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            content_json TEXT NOT NULL,
+            usage_json TEXT,
+            state TEXT NOT NULL,
+            tool_calls_json TEXT,
+            FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_transcript_session_turn
+            ON transcript_entries(session_id, turn_number, id);
         ",
     )
     .map_err(map_db_error)
@@ -329,6 +515,64 @@ fn finding_from_row(row: &Row<'_>) -> rusqlite::Result<Finding> {
         pass_version,
         kind,
         confidence,
+    })
+}
+
+fn review_queue_from_row(row: &Row<'_>) -> rusqlite::Result<ReviewQueueRecord> {
+    let id_text: String = row.get(0)?;
+    let session_id_text: String = row.get(1)?;
+    let function_addr: i64 = row.get(3)?;
+    let target_addr: Option<i64> = row.get(4)?;
+
+    let id = Uuid::parse_str(&id_text)
+        .map_err(|err| rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(err)))?;
+    let session_id = Uuid::parse_str(&session_id_text)
+        .map_err(|err| rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(err)))?;
+
+    Ok(ReviewQueueRecord {
+        id,
+        session_id,
+        kind: row.get(2)?,
+        function_addr: u64::try_from(function_addr).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(3, Type::Integer, Box::new(err))
+        })?,
+        target_addr: target_addr
+            .map(|value| {
+                u64::try_from(value).map_err(|err| {
+                    rusqlite::Error::FromSqlConversionFailure(4, Type::Integer, Box::new(err))
+                })
+            })
+            .transpose()?,
+        current_name: row.get(5)?,
+        proposed_value: row.get(6)?,
+        confidence: row.get(7)?,
+        status: row.get(8)?,
+        created_at: row.get(9)?,
+    })
+}
+
+fn transcript_from_row(row: &Row<'_>) -> rusqlite::Result<TranscriptRecord> {
+    let id_text: String = row.get(0)?;
+    let session_id_text: String = row.get(1)?;
+    let turn_number: i64 = row.get(2)?;
+
+    let id = Uuid::parse_str(&id_text)
+        .map_err(|err| rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(err)))?;
+    let session_id = Uuid::parse_str(&session_id_text)
+        .map_err(|err| rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(err)))?;
+
+    Ok(TranscriptRecord {
+        id,
+        session_id,
+        turn_number: u32::try_from(turn_number).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(2, Type::Integer, Box::new(err))
+        })?,
+        role: row.get(3)?,
+        timestamp: row.get(4)?,
+        content_json: row.get(5)?,
+        usage_json: row.get(6)?,
+        state: row.get(7)?,
+        tool_calls_json: row.get(8)?,
     })
 }
 
