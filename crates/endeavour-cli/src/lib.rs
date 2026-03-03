@@ -4,3 +4,4 @@
 pub mod auth;
 /// Terminal formatting helpers.
 pub mod fmt;
+pub mod tui;
