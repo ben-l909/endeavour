@@ -7,7 +7,8 @@ use anyhow::{Context, Result};
 use endeavour_core::config::Config;
 use endeavour_core::store::SessionStore;
 use endeavour_core::{loader, Session};
-use endeavour_ida::{DecompileResult, IdaClient, Transport};
+use endeavour_ida::{DecompileResult, IdaClient, IdaError, Transport};
+use endeavour_llm::{create_provider, CompletionRequest, CompletionResponse, LlmError, LlmProvider, Message, Role};
 use reedline::{DefaultPrompt, DefaultPromptSegment, FileBackedHistory, Reedline, Signal};
 use tokio::runtime::Runtime;
 
@@ -28,6 +29,7 @@ enum ReplCommand {
     Connect(Option<String>),
     IdaStatus,
     Decompile(String),
+    Explain(String),
     Rename(String, String),
     Comment(String, String),
     Callgraph(String, Option<u32>),
@@ -93,6 +95,9 @@ impl Repl {
                     }
                     ParsedLine::Command(ReplCommand::Decompile(target)) => {
                         self.handle_decompile(&target);
+                    }
+                    ParsedLine::Command(ReplCommand::Explain(target)) => {
+                        self.handle_explain(&target)?;
                     }
                     ParsedLine::Command(ReplCommand::Rename(target, new_name)) => {
                         self.handle_rename(&target, &new_name)?;
@@ -291,6 +296,66 @@ impl Repl {
         println!("{}", render_decompile_result(&function_name, &result));
     }
 
+    fn handle_explain(&self, target: &str) -> Result<()> {
+        let Some(client) = self.ida_client.as_ref() else {
+            println!("Not connected. Run: connect <host:port>");
+            return Ok(());
+        };
+
+        let (address, function_name) = match resolve_target_address(&self.runtime, client.as_ref(), target) {
+            Ok(value) => value,
+            Err(err) => {
+                println!("Failed to resolve target '{target}': {err}");
+                return Ok(());
+            }
+        };
+
+        let decompile_result = match self.runtime.block_on(client.decompile(address)) {
+            Ok(value) => value,
+            Err(err) if is_missing_function_error(&err) => {
+                println!("No function at address");
+                return Ok(());
+            }
+            Err(err) => {
+                println!("Failed to decompile {}: {err}", fmt::format_addr(address));
+                return Ok(());
+            }
+        };
+
+        println!("Analyzing function at {}...", fmt::format_addr(address));
+
+        let config = Config::load().context("failed to load config")?;
+        let api_key_hint = explain_api_key_hint(&config);
+        if !has_llm_api_key(&config) {
+            println!("No API key configured. Run: {api_key_hint}");
+            return Ok(());
+        }
+
+        let provider = match create_provider(&config) {
+            Ok(provider) => provider,
+            Err(LlmError::AuthFailed) => {
+                println!("LLM provider authentication failed. Check your API key with: {api_key_hint}");
+                return Ok(());
+            }
+            Err(err) => {
+                println!("Failed to initialize LLM provider: {}", format_llm_error(&err));
+                return Ok(());
+            }
+        };
+
+        let request = build_explain_request(&config, &function_name, &decompile_result);
+        let response = match complete_explain_request(&self.runtime, provider.as_ref(), request) {
+            Ok(value) => value,
+            Err(err) => {
+                println!("Explain request failed: {}", format_llm_error(&err));
+                return Ok(());
+            }
+        };
+
+        println!("{}", render_explain_result(&function_name, address, &response.content));
+        Ok(())
+    }
+
     fn handle_rename(&self, target: &str, new_name: &str) -> Result<()> {
         let Some(client) = self.ida_client.as_ref() else {
             println!("Not connected. Run: connect <host:port>");
@@ -299,8 +364,8 @@ impl Repl {
 
         let (address, _) = match resolve_target_address(&self.runtime, client.as_ref(), target) {
             Ok(value) => value,
-            Err(_) => {
-                println!("No function at address");
+            Err(err) => {
+                println!("{}", format_resolve_target_error(target, &err));
                 return Ok(());
             }
         };
@@ -321,8 +386,8 @@ impl Repl {
 
         let (address, _) = match resolve_target_address(&self.runtime, client.as_ref(), target) {
             Ok(value) => value,
-            Err(_) => {
-                println!("No function at address");
+            Err(err) => {
+                println!("{}", format_resolve_target_error(target, &err));
                 return Ok(());
             }
         };
@@ -552,6 +617,10 @@ fn parse_command(line: &str) -> ParsedLine {
             Some(target) => ParsedLine::Command(ReplCommand::Decompile(target.to_string())),
             None => ParsedLine::InvalidUsage("decompile <addr>"),
         },
+        "explain" => match tokens.next() {
+            Some(target) => ParsedLine::Command(ReplCommand::Explain(target.to_string())),
+            None => ParsedLine::InvalidUsage("explain <addr>"),
+        },
         "rename" => {
             let Some(target) = tokens.next() else {
                 return ParsedLine::InvalidUsage("rename <addr> <new_name>");
@@ -737,6 +806,7 @@ fn print_help() {
     println!("  connect [host:port]  Connect to IDA MCP (default: localhost:13337)");
     println!("  ida-status           Check IDA connection health");
     println!("  decompile <addr>     Decompile function (0x..., decimal, or sub_...)");
+    println!("  explain <addr>       Analyze function behavior with LLM");
     println!("  rename <addr> <new_name>  Rename function at address");
     println!("  comment <addr> <text...>  Set comment at address");
     println!("  callgraph <addr> [depth]  Show call graph tree (default depth: 3)");
@@ -776,6 +846,65 @@ fn render_decompile_result(function_name: &str, result: &DecompileResult) -> Str
     }
 
     lines.join("\n")
+}
+
+fn build_explain_request(config: &Config, function_name: &str, result: &DecompileResult) -> CompletionRequest {
+    let system_prompt = "You are an expert reverse engineer analyzing decompiled code. Explain what this function does, identify key behaviors, potential vulnerabilities, and suggest meaningful names for the function and its variables.";
+    let user_prompt = format!(
+        "Analyze function {function_name} at {address}.\n\nDecompiled pseudocode:\n```c\n{pseudocode}\n```",
+        address = fmt::format_addr(result.address),
+        pseudocode = result.pseudocode
+    );
+
+    CompletionRequest {
+        model: default_explain_model(config).to_string(),
+        messages: vec![
+            Message {
+                role: Role::System,
+                content: system_prompt.to_string(),
+            },
+            Message {
+                role: Role::User,
+                content: user_prompt,
+            },
+        ],
+        max_tokens: Some(1_200),
+        temperature: Some(0.1),
+    }
+}
+
+fn default_explain_model(config: &Config) -> &'static str {
+    match config.default_provider.as_deref() {
+        Some("openai") => "gpt-4o-mini",
+        Some("anthropic") => "claude-3-5-sonnet-20241022",
+        _ if config.anthropic_api_key.is_some() => "claude-3-5-sonnet-20241022",
+        _ => "gpt-4o-mini",
+    }
+}
+
+fn complete_explain_request(
+    runtime: &Runtime,
+    provider: &dyn LlmProvider,
+    request: CompletionRequest,
+) -> std::result::Result<CompletionResponse, LlmError> {
+    runtime.block_on(provider.complete(request))
+}
+
+fn render_explain_result(function_name: &str, address: u64, analysis: &str) -> String {
+    let title = format!("Function Analysis: {function_name} @ {}", fmt::format_addr(address));
+    let body = if analysis.trim().is_empty() {
+        "(No analysis text returned.)"
+    } else {
+        analysis.trim()
+    };
+
+    [
+        fmt::h2(title),
+        fmt::separator(fmt::Separator::Standard, 88),
+        body.to_string(),
+        fmt::separator(fmt::Separator::Standard, 88),
+    ]
+    .join("\n")
 }
 
 fn render_callgraph_output(runtime: &Runtime, client: &IdaClient, target: &str, depth: u32) -> Result<String> {
@@ -912,6 +1041,19 @@ fn resolve_target_address(runtime: &Runtime, client: &IdaClient, target: &str) -
     Ok((function.address, function.name))
 }
 
+fn format_resolve_target_error(target: &str, err: &anyhow::Error) -> String {
+    if is_target_not_found_error(target, err) {
+        return format!("No function at address {target}");
+    }
+
+    format!("Failed to resolve target '{target}': {err:#}")
+}
+
+fn is_target_not_found_error(target: &str, err: &anyhow::Error) -> bool {
+    let expected = format!("function '{target}' not found");
+    err.chain().any(|cause| cause.to_string() == expected)
+}
+
 fn parse_decompile_target(raw: &str) -> Option<u64> {
     let input = raw.trim();
     if let Some(hex) = input.strip_prefix("0x").or_else(|| input.strip_prefix("0X")) {
@@ -927,6 +1069,46 @@ fn parse_decompile_target(raw: &str) -> Option<u64> {
     }
 
     None
+}
+
+fn has_llm_api_key(config: &Config) -> bool {
+    config.anthropic_api_key.is_some() || config.openai_api_key.is_some()
+}
+
+fn explain_api_key_hint(config: &Config) -> String {
+    match config.default_provider.as_deref() {
+        Some("anthropic") => "config set anthropic_api_key <key>".to_string(),
+        Some("openai") => "config set openai_api_key <key>".to_string(),
+        _ => {
+            "config set anthropic_api_key <key> or config set openai_api_key <key>".to_string()
+        }
+    }
+}
+
+fn is_missing_function_error(error: &IdaError) -> bool {
+    match error {
+        IdaError::IdaResponseError(message) | IdaError::DeserializationError(message) => {
+            message.to_ascii_lowercase().contains("not found")
+        }
+        _ => false,
+    }
+}
+
+fn format_llm_error(error: &LlmError) -> String {
+    match error {
+        LlmError::AuthFailed => "Authentication failed; verify your API key".to_string(),
+        LlmError::RateLimited { retry_after } => {
+            if let Some(seconds) = retry_after {
+                format!("rate limited; retry in {seconds}s")
+            } else {
+                "rate limited; retry later".to_string()
+            }
+        }
+        LlmError::ContextWindowExceeded => {
+            "prompt too large for the selected model context window".to_string()
+        }
+        _ => error.to_string(),
+    }
 }
 
 fn fetch_search_results(runtime: &Runtime, client: &IdaClient, pattern: &str) -> Result<Vec<(u64, String)>> {
@@ -963,16 +1145,21 @@ fn render_search_output(matches: &[(u64, String)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        connect_with_transport, fetch_search_results, parse_command, parse_decompile_target,
-        rename_symbol, set_symbol_comment,
-        render_callgraph_output, render_decompile_output, render_search_output, ParsedLine,
-        ReplCommand,
+        build_explain_request, complete_explain_request, connect_with_transport,
+        explain_api_key_hint, fetch_search_results, is_missing_function_error, parse_command, parse_decompile_target,
+        rename_symbol, resolve_target_address, set_symbol_comment,
+        format_resolve_target_error,
+        render_callgraph_output, render_decompile_output, render_explain_result,
+        render_search_output, ParsedLine, ReplCommand,
     };
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
-    use endeavour_ida::{IdaClient, IdaError, Transport};
+    use endeavour_core::config::Config;
+    use endeavour_ida::{DecompileResult, IdaClient, IdaError, Transport};
+    use endeavour_llm::mock::{MockProvider, MockResponse};
+    use endeavour_llm::CompletionResponse;
     use serde_json::{json, Value};
     use tokio::runtime::Runtime;
 
@@ -997,6 +1184,10 @@ mod tests {
         assert_eq!(
             parse_command("decompile 0x401000"),
             ParsedLine::Command(ReplCommand::Decompile("0x401000".to_string()))
+        );
+        assert_eq!(
+            parse_command("explain 0x401000"),
+            ParsedLine::Command(ReplCommand::Explain("0x401000".to_string()))
         );
         assert_eq!(
             parse_command("search objc_msgSend"),
@@ -1338,5 +1529,136 @@ mod tests {
         let commented = set_symbol_comment(&runtime, &client, 0x401000, "entry point");
         assert!(commented.is_ok());
         assert_eq!(mock.first_call_method().as_deref(), Some("set_comments"));
+    }
+
+    #[test]
+    fn explain_flow_uses_mock_provider_and_renders_output() {
+        let runtime = Runtime::new();
+        assert!(runtime.is_ok());
+        let runtime = match runtime {
+            Ok(value) => value,
+            Err(err) => panic!("failed to create runtime: {err}"),
+        };
+
+        let provider = MockProvider::new(vec![MockResponse::Completion(Ok(CompletionResponse {
+            model: "test-model".to_string(),
+            content: "This function parses a header, validates bounds, and dispatches by opcode. Suggested name: parse_packet.".to_string(),
+            stop_reason: Some("stop".to_string()),
+            input_tokens: Some(100),
+            output_tokens: Some(32),
+        }))]);
+
+        let config = Config {
+            anthropic_api_key: Some("sk-ant-test".to_string()),
+            openai_api_key: None,
+            default_provider: Some("anthropic".to_string()),
+        };
+
+        let decompile = DecompileResult {
+            address: 0x401000,
+            pseudocode: "int parse(unsigned char *buf, int len) {\n  if (len < 4) return -1;\n  return buf[0];\n}".to_string(),
+        };
+
+        let request = build_explain_request(&config, "sub_401000", &decompile);
+        let response = complete_explain_request(&runtime, &provider, request);
+        assert!(response.is_ok());
+        let response = match response {
+            Ok(value) => value,
+            Err(err) => panic!("unexpected llm error: {err}"),
+        };
+        assert!(response.content.contains("Suggested name"));
+
+        let rendered = render_explain_result("sub_401000", 0x401000, &response.content);
+        assert!(rendered.contains("Function Analysis: sub_401000 @ 0x00401000"));
+        assert!(rendered.contains("parses a header"));
+    }
+
+    #[test]
+    fn explain_api_key_hint_uses_default_provider() {
+        let config = Config {
+            anthropic_api_key: None,
+            openai_api_key: None,
+            default_provider: Some("openai".to_string()),
+        };
+
+        assert_eq!(explain_api_key_hint(&config), "config set openai_api_key <key>");
+    }
+
+    #[test]
+    fn explain_api_key_hint_without_default_provider_lists_both() {
+        let config = Config::default();
+
+        assert_eq!(
+            explain_api_key_hint(&config),
+            "config set anthropic_api_key <key> or config set openai_api_key <key>"
+        );
+    }
+
+    #[test]
+    fn missing_function_error_detection_matches_not_found_only() {
+        assert!(is_missing_function_error(&IdaError::IdaResponseError(
+            "Function not found".to_string()
+        )));
+        assert!(!is_missing_function_error(&IdaError::ConnectionError(
+            "refused".to_string()
+        )));
+    }
+
+    #[test]
+    fn resolve_target_not_found_formats_no_function_message() {
+        let runtime = Runtime::new();
+        assert!(runtime.is_ok());
+        let runtime = match runtime {
+            Ok(value) => value,
+            Err(err) => panic!("failed to create runtime: {err}"),
+        };
+
+        let mock = Arc::new(MockTransport::new(vec![Ok(json!([
+            {
+                "fn": null
+            }
+        ]))]));
+        let client = IdaClient::with_transport("127.0.0.1", 13337, mock.clone());
+
+        let target = "missing_symbol";
+        let result = resolve_target_address(&runtime, &client, target);
+        assert!(result.is_err());
+        let err = match result {
+            Ok(_) => panic!("expected resolve_target_address to fail"),
+            Err(err) => err,
+        };
+
+        let message = format_resolve_target_error(target, &err);
+        assert_eq!(message, "No function at address missing_symbol");
+        assert_eq!(mock.first_call_method().as_deref(), Some("lookup_funcs"));
+    }
+
+    #[test]
+    fn resolve_target_transport_error_preserves_context_message() {
+        let runtime = Runtime::new();
+        assert!(runtime.is_ok());
+        let runtime = match runtime {
+            Ok(value) => value,
+            Err(err) => panic!("failed to create runtime: {err}"),
+        };
+
+        let mock = Arc::new(MockTransport::new(vec![Err(IdaError::IdaResponseError(
+            "transport unavailable".to_string(),
+        ))]));
+        let client = IdaClient::with_transport("127.0.0.1", 13337, mock.clone());
+
+        let target = "main";
+        let result = resolve_target_address(&runtime, &client, target);
+        assert!(result.is_err());
+        let err = match result {
+            Ok(_) => panic!("expected resolve_target_address to fail"),
+            Err(err) => err,
+        };
+
+        let message = format_resolve_target_error(target, &err);
+        assert!(message.contains("Failed to resolve target 'main'"));
+        assert!(message.contains("failed to resolve function 'main'"));
+        assert!(message.contains("IDA returned error: transport unavailable"));
+        assert_eq!(mock.first_call_method().as_deref(), Some("lookup_funcs"));
     }
 }
