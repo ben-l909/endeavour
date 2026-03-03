@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use time::macros::format_description;
 use time::OffsetDateTime;
 
-use super::status_bar::{IdaConnectionState, StatusBar, StatusBarState};
+use super::status_bar::{IdaConnectionState, IrFrontendState, StatusBar, StatusBarState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
@@ -25,6 +25,8 @@ pub enum AppEvent {
     Tick,
     SystemMessage(String),
     IdaConnectionChanged(bool),
+    /// Updates the status bar with the currently active IR frontend.
+    IrFrontendChanged(IrFrontendState),
     SessionChanged(Option<String>),
     TurnCompleted {
         tokens_used: u64,
@@ -172,13 +174,19 @@ impl App {
                 self.status.ida = if is_connected {
                     IdaConnectionState::Connected
                 } else {
+                    self.status.ir_frontend = IrFrontendState::None;
                     IdaConnectionState::Disconnected
                 };
+                self.dirty = true;
+            }
+            AppEvent::IrFrontendChanged(ir_frontend) => {
+                self.status.ir_frontend = ir_frontend;
                 self.dirty = true;
             }
             AppEvent::SessionChanged(session_id) => {
                 self.status.session_id = session_id;
                 self.status.tokens = 0;
+                self.status.ir_frontend = IrFrontendState::None;
                 self.dirty = true;
             }
             AppEvent::TurnCompleted { tokens_used } => {
@@ -1005,7 +1013,7 @@ fn dim() -> Color {
 mod tests {
     use ratatui::layout::Rect;
 
-    use super::{App, AppEvent};
+    use super::{App, AppEvent, IrFrontendState};
 
     #[test]
     fn computes_layout_for_80x24_and_120x40() {
@@ -1082,7 +1090,7 @@ mod tests {
         let status = app.status_line(120).to_string();
         assert_eq!(
             status,
-            "[IDA: connected] [Session: 3f2a1b4c] [Tokens: 4,821] [Auth: none]"
+            "[IDA: connected] [Session: 3f2a1b4c] [Tokens: 4,821] [IR: none] [Auth: none]"
         );
     }
 
@@ -1096,6 +1104,19 @@ mod tests {
 
         let status = app.status_line(120).to_string();
         assert!(status.contains("[Tokens: 0]"));
+        assert!(status.contains("[IR: none]"));
+    }
+
+    #[test]
+    fn status_line_updates_ir_frontend_after_lift() {
+        let mut app = App::new();
+        app.reduce(AppEvent::SessionChanged(Some(
+            "550e8400-e29b-41d4-a716-446655440000".to_string(),
+        )));
+        app.reduce(AppEvent::IrFrontendChanged(IrFrontendState::Ida));
+
+        let status = app.status_line(120).to_string();
+        assert!(status.contains("[IR: ida]"));
     }
 
     #[test]

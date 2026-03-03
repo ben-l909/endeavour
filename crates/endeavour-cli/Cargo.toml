@@ -31,6 +31,7 @@ rand = "0.9"
 endeavour-core = { path = "../endeavour-core" }
 endeavour-ida = { path = "../endeavour-ida" }
 endeavour-llm = { path = "../endeavour-llm" }
+endeavour-ir = { path = "../endeavour-ir" }
 
 [dev-dependencies]
 assert_cmd = "2"

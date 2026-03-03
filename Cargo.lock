@@ -658,6 +658,7 @@ dependencies = [
  "crossterm",
  "endeavour-core",
  "endeavour-ida",
+ "endeavour-ir",
  "endeavour-llm",
  "futures-util",
  "owo-colors",

@@ -318,7 +318,7 @@ fn status_bar_disconnected_connected_mocks_are_available() {
     assert_row_contains(
         &first,
         23,
-        "[IDA: disconnected] [Session: none] [Tokens: 0]",
+        "[IDA: disconnected] [Session: none] [Tokens: 0] [Auth: none]",
     );
     let disconnected_col = find_in_row(&first, 23, "disconnected").expect("status should exist");
     assert_cell_fg(&first, 23, disconnected_col, Color::Rgb(212, 138, 74));
@@ -335,7 +335,11 @@ fn status_bar_session_and_tokens_width_behaviour() {
     assert_row_contains(&compact, 23, "[Tokens: 0]");
 
     let wide = render_app(&mut app, 120, 40);
-    assert_row_contains(&wide, 39, "[IDA: disconnected] [Session: none] [Tokens: 0]");
+    assert_row_contains(
+        &wide,
+        39,
+        "[IDA: disconnected] [Session: none] [Tokens: 0] [Auth: none]",
+    );
 }
 
 fn controller() -> AgenticLoopController {
