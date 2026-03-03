@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 
 pub mod app;
 pub mod event;
+pub mod intent_router;
 
 pub use app::AppEvent;
 
