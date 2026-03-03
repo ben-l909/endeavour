@@ -9,6 +9,8 @@ use endeavour_ida::IdaClient;
 use tracing::info;
 use uuid::Uuid;
 
+/// Authentication support modules.
+pub mod auth;
 pub mod fmt;
 mod repl;
 
