@@ -1,11 +1,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::{collections::HashMap, collections::HashSet};
 
 use crate::fmt;
 use anyhow::{Context, Result};
+use endeavour_core::config::Config;
 use endeavour_core::store::SessionStore;
 use endeavour_core::{loader, Session};
-use endeavour_ida::{IdaClient, Transport};
+use endeavour_ida::{DecompileResult, IdaClient, Transport};
 use reedline::{DefaultPrompt, DefaultPromptSegment, FileBackedHistory, Reedline, Signal};
 use tokio::runtime::Runtime;
 
@@ -26,11 +28,17 @@ enum ReplCommand {
     Connect(Option<String>),
     IdaStatus,
     Decompile(String),
+    Callgraph(String, Option<u32>),
     Search(String),
     Sessions,
     Session(String),
     Info,
     Findings,
+    CacheStats,
+    CacheClear,
+    ConfigSet { key: String, value: String },
+    ConfigGet(String),
+    ConfigList,
     Quit,
 }
 
@@ -84,6 +92,9 @@ impl Repl {
                     ParsedLine::Command(ReplCommand::Decompile(target)) => {
                         self.handle_decompile(&target);
                     }
+                    ParsedLine::Command(ReplCommand::Callgraph(target, max_depth)) => {
+                        self.handle_callgraph(&target, max_depth)?;
+                    }
                     ParsedLine::Command(ReplCommand::Search(pattern)) => {
                         self.handle_search(&pattern)?;
                     }
@@ -98,6 +109,21 @@ impl Repl {
                     }
                     ParsedLine::Command(ReplCommand::Findings) => {
                         self.handle_findings()?;
+                    }
+                    ParsedLine::Command(ReplCommand::CacheStats) => {
+                        self.handle_cache_stats()?;
+                    }
+                    ParsedLine::Command(ReplCommand::CacheClear) => {
+                        self.handle_cache_clear()?;
+                    }
+                    ParsedLine::Command(ReplCommand::ConfigSet { key, value }) => {
+                        self.handle_config_set(&key, &value)?;
+                    }
+                    ParsedLine::Command(ReplCommand::ConfigGet(key)) => {
+                        self.handle_config_get(&key)?;
+                    }
+                    ParsedLine::Command(ReplCommand::ConfigList) => {
+                        self.handle_config_list()?;
                     }
                     ParsedLine::Command(ReplCommand::Quit) => break,
                     ParsedLine::Unknown(cmd) => {
@@ -215,10 +241,93 @@ impl Repl {
             return;
         };
 
-        match render_decompile_output(&self.runtime, client.as_ref(), target) {
-            Ok(output) => println!("{output}"),
-            Err(_) => println!("No function at address"),
+        let (address, function_name) = match resolve_target_address(&self.runtime, client.as_ref(), target) {
+            Ok(value) => value,
+            Err(_) => {
+                println!("No function at address");
+                return;
+            }
+        };
+
+        let session_id = self.active_session.as_ref().map(|session| session.id);
+
+        let cached_result = session_id
+            .and_then(|id| {
+                self.store
+                    .get_cached_ida_result(id, "decompile", address)
+                    .ok()
+                    .flatten()
+            })
+            .and_then(|payload| serde_json::from_str::<DecompileResult>(&payload).ok());
+
+        let result = if let Some(cached) = cached_result {
+            cached
+        } else {
+            let fetched = match self.runtime.block_on(client.decompile(address)) {
+                Ok(value) => value,
+                Err(_) => {
+                    println!("No function at address");
+                    return;
+                }
+            };
+
+            if let Some(id) = session_id {
+                if let Ok(serialized) = serde_json::to_string(&fetched) {
+                    let _ = self.store.cache_ida_result(id, "decompile", address, &serialized);
+                }
+            }
+
+            fetched
+        };
+
+        println!("{}", render_decompile_result(&function_name, &result));
+    }
+
+    fn handle_cache_stats(&self) -> Result<()> {
+        let Some(session) = &self.active_session else {
+            println!("No active session. Use 'analyze <path>' or 'session <id>'.");
+            return Ok(());
+        };
+
+        let stats = self
+            .store
+            .cache_stats(session.id)
+            .with_context(|| format!("failed to get cache stats for session {}", session.id))?;
+
+        println!("Cache entries: {}", stats.entry_count);
+        if stats.methods.is_empty() {
+            println!("Cached methods: (none)");
+        } else {
+            println!("Cached methods: {}", stats.methods.join(", "));
         }
+
+        Ok(())
+    }
+
+    fn handle_cache_clear(&self) -> Result<()> {
+        let Some(session) = &self.active_session else {
+            println!("No active session. Use 'analyze <path>' or 'session <id>'.");
+            return Ok(());
+        };
+
+        self.store
+            .clear_ida_cache(session.id)
+            .with_context(|| format!("failed to clear cache for session {}", session.id))?;
+
+        println!("Cleared cache for session {}", session.id);
+        Ok(())
+    }
+
+    fn handle_callgraph(&self, target: &str, max_depth: Option<u32>) -> Result<()> {
+        let Some(client) = self.ida_client.as_ref() else {
+            println!("Not connected. Run: connect <host:port>");
+            return Ok(());
+        };
+
+        let depth = max_depth.unwrap_or(3);
+        let output = render_callgraph_output(&self.runtime, client.as_ref(), target, depth)?;
+        println!("{output}");
+        Ok(())
     }
 
     fn handle_search(&self, pattern: &str) -> Result<()> {
@@ -321,6 +430,45 @@ impl Repl {
 
         Ok(())
     }
+
+    fn handle_config_set(&self, key: &str, value: &str) -> Result<()> {
+        let mut config = Config::load().context("failed to load config")?;
+        config
+            .set(key, value)
+            .with_context(|| format!("failed to set config key '{key}'"))?;
+        config.save().context("failed to save config")?;
+
+        println!("Set {key} = {}", mask_config_value(key, value));
+        Ok(())
+    }
+
+    fn handle_config_get(&self, key: &str) -> Result<()> {
+        let config = Config::load().context("failed to load config")?;
+        match config
+            .get(key)
+            .with_context(|| format!("failed to read config key '{key}'"))?
+        {
+            Some(value) => println!("{key} = {}", mask_config_value(key, value)),
+            None => println!("{key} is not set"),
+        }
+
+        Ok(())
+    }
+
+    fn handle_config_list(&self) -> Result<()> {
+        let config = Config::load().context("failed to load config")?;
+        for key in ["anthropic-api-key", "openai-api-key", "default-provider"] {
+            match config
+                .get(key)
+                .with_context(|| format!("failed to read config key '{key}'"))?
+            {
+                Some(value) => println!("{key} = {}", mask_config_value(key, value)),
+                None => println!("{key} = <not set>"),
+            }
+        }
+
+        Ok(())
+    }
 }
 
 fn parse_command(line: &str) -> ParsedLine {
@@ -352,6 +500,25 @@ fn parse_command(line: &str) -> ParsedLine {
             Some(target) => ParsedLine::Command(ReplCommand::Decompile(target.to_string())),
             None => ParsedLine::InvalidUsage("decompile <addr>"),
         },
+        "callgraph" => {
+            let Some(target) = tokens.next() else {
+                return ParsedLine::InvalidUsage("callgraph <addr> [depth]");
+            };
+
+            let depth = match tokens.next() {
+                Some(raw_depth) => match raw_depth.parse::<u32>() {
+                    Ok(parsed) => Some(parsed),
+                    Err(_) => return ParsedLine::InvalidUsage("callgraph <addr> [depth]"),
+                },
+                None => None,
+            };
+
+            if tokens.next().is_some() {
+                ParsedLine::InvalidUsage("callgraph <addr> [depth]")
+            } else {
+                ParsedLine::Command(ReplCommand::Callgraph(target.to_string(), depth))
+            }
+        }
         "search" => {
             let pattern: Vec<&str> = tokens.collect();
             if pattern.is_empty() {
@@ -367,9 +534,55 @@ fn parse_command(line: &str) -> ParsedLine {
         },
         "info" => ParsedLine::Command(ReplCommand::Info),
         "findings" => ParsedLine::Command(ReplCommand::Findings),
+        "cache" => match tokens.next() {
+            Some("stats") if tokens.next().is_none() => ParsedLine::Command(ReplCommand::CacheStats),
+            Some("clear") if tokens.next().is_none() => ParsedLine::Command(ReplCommand::CacheClear),
+            _ => ParsedLine::InvalidUsage("cache <stats|clear>"),
+        },
+        "config" => match tokens.next() {
+            Some("set") => {
+                let Some(key) = tokens.next() else {
+                    return ParsedLine::InvalidUsage("config set <key> <value>");
+                };
+
+                let value_tokens: Vec<&str> = tokens.collect();
+                if value_tokens.is_empty() {
+                    ParsedLine::InvalidUsage("config set <key> <value>")
+                } else {
+                    ParsedLine::Command(ReplCommand::ConfigSet {
+                        key: key.to_string(),
+                        value: value_tokens.join(" "),
+                    })
+                }
+            }
+            Some("get") => match tokens.next() {
+                Some(key) => ParsedLine::Command(ReplCommand::ConfigGet(key.to_string())),
+                None => ParsedLine::InvalidUsage("config get <key>"),
+            },
+            Some("list") => {
+                if tokens.next().is_some() {
+                    ParsedLine::InvalidUsage("config list")
+                } else {
+                    ParsedLine::Command(ReplCommand::ConfigList)
+                }
+            }
+            _ => ParsedLine::InvalidUsage("config <set|get|list> ..."),
+        },
         "quit" | "exit" => ParsedLine::Command(ReplCommand::Quit),
         other => ParsedLine::Unknown(other.to_string()),
     }
+}
+
+fn mask_config_value(key: &str, value: &str) -> String {
+    if is_api_key(key) {
+        return format!("{}...", value.chars().take(8).collect::<String>());
+    }
+
+    value.to_string()
+}
+
+fn is_api_key(key: &str) -> bool {
+    matches!(key, "anthropic-api-key" | "anthropic_api_key" | "openai-api-key" | "openai_api_key")
 }
 
 fn create_editor(history_file: &Path) -> Result<Reedline> {
@@ -445,18 +658,29 @@ fn print_help() {
     println!("  connect [host:port]  Connect to IDA MCP (default: localhost:13337)");
     println!("  ida-status           Check IDA connection health");
     println!("  decompile <addr>     Decompile function (0x..., decimal, or sub_...)");
+    println!("  callgraph <addr> [depth]  Show call graph tree (default depth: 3)");
     println!("  search <pattern>     Search strings with regex pattern");
     println!("  sessions             List all sessions");
     println!("  session <id>         Switch active session");
     println!("  info                 Show active session info");
     println!("  findings             List findings in active session");
+    println!("  cache stats          Show IDA cache stats for active session");
+    println!("  cache clear          Clear IDA cache for active session");
+    println!("  config set <k> <v>   Set config value in ~/.endeavour/config.toml");
+    println!("  config get <k>       Get config value (API keys masked)");
+    println!("  config list          List config keys and masked values");
     println!("  quit | exit          Exit the REPL");
 }
 
+#[cfg(test)]
 fn render_decompile_output(runtime: &Runtime, client: &IdaClient, target: &str) -> Result<String> {
     let (address, function_name) = resolve_target_address(runtime, client, target)?;
     let result = runtime.block_on(client.decompile(address))?;
 
+    Ok(render_decompile_result(&function_name, &result))
+}
+
+fn render_decompile_result(function_name: &str, result: &DecompileResult) -> String {
     let mut lines = vec![
         fmt::h2(format!("{} @ {}", function_name, fmt::format_addr(result.address))),
         fmt::separator(fmt::Separator::Standard, 88),
@@ -470,7 +694,123 @@ fn render_decompile_output(runtime: &Runtime, client: &IdaClient, target: &str) 
         lines.push("   1 |".to_string());
     }
 
+    lines.join("\n")
+}
+
+fn render_callgraph_output(runtime: &Runtime, client: &IdaClient, target: &str, depth: u32) -> Result<String> {
+    let (root_addr, root_name) = resolve_target_address(runtime, client, target)?;
+    let edges = runtime
+        .block_on(client.call_graph(root_addr, Some(depth)))
+        .with_context(|| format!("failed to fetch call graph for {}", fmt::format_addr(root_addr)))?;
+
+    let mut adjacency: HashMap<u64, Vec<u64>> = HashMap::new();
+    let mut node_order = Vec::new();
+    let mut seen_nodes = HashSet::new();
+    seen_nodes.insert(root_addr);
+    for (src, dst) in edges {
+        let entry = adjacency.entry(src).or_default();
+        if !entry.contains(&dst) {
+            entry.push(dst);
+        }
+        if seen_nodes.insert(src) {
+            node_order.push(src);
+        }
+        if seen_nodes.insert(dst) {
+            node_order.push(dst);
+        }
+    }
+
+    let mut name_cache = HashMap::new();
+    name_cache.insert(root_addr, root_name.clone());
+    for addr in node_order {
+        if name_cache.contains_key(&addr) {
+            continue;
+        }
+
+        let query = fmt::format_addr(addr);
+        let name = runtime
+            .block_on(client.lookup_function(&query))
+            .ok()
+            .and_then(|function| function.map(|item| item.name))
+            .unwrap_or_else(|| format!("sub_{addr:x}"));
+        name_cache.insert(addr, name);
+    }
+
+    let header = format!(
+        "Call Graph: {} @ {} (depth={depth})",
+        root_name,
+        fmt::format_addr(root_addr)
+    );
+    let mut lines = vec![header.clone(), fmt::separator(fmt::Separator::Standard, header.chars().count())];
+
+    let children = adjacency.get(&root_addr).cloned().unwrap_or_default();
+    if children.is_empty() {
+        lines.push("(no callees)".to_string());
+        return Ok(lines.join("\n"));
+    }
+
+    let mut ancestors = HashSet::new();
+    ancestors.insert(root_addr);
+    render_callgraph_branch(
+        root_addr,
+        &children,
+        &adjacency,
+        &name_cache,
+        "",
+        &ancestors,
+        &mut lines,
+    );
+
     Ok(lines.join("\n"))
+}
+
+fn render_callgraph_branch(
+    _parent: u64,
+    children: &[u64],
+    adjacency: &HashMap<u64, Vec<u64>>,
+    names: &HashMap<u64, String>,
+    prefix: &str,
+    ancestors: &HashSet<u64>,
+    lines: &mut Vec<String>,
+) {
+    for (index, child) in children.iter().enumerate() {
+        let is_last = index + 1 == children.len();
+        let branch = if is_last { "└── " } else { "├── " };
+        let name = names
+            .get(child)
+            .cloned()
+            .unwrap_or_else(|| format!("sub_{child:x}"));
+
+        if ancestors.contains(child) {
+            lines.push(format!(
+                "{prefix}{branch}{name} @ {} [recursive]",
+                fmt::format_addr(*child)
+            ));
+            continue;
+        }
+
+        lines.push(format!("{prefix}{branch}{name} @ {}", fmt::format_addr(*child)));
+
+        let mut next_ancestors = ancestors.clone();
+        next_ancestors.insert(*child);
+        let child_prefix = if is_last {
+            format!("{prefix}    ")
+        } else {
+            format!("{prefix}│   ")
+        };
+
+        if let Some(grandchildren) = adjacency.get(child) {
+            render_callgraph_branch(
+                *child,
+                grandchildren,
+                adjacency,
+                names,
+                &child_prefix,
+                &next_ancestors,
+                lines,
+            );
+        }
+    }
 }
 
 fn resolve_target_address(runtime: &Runtime, client: &IdaClient, target: &str) -> Result<(u64, String)> {
@@ -531,7 +871,8 @@ fn render_search_output(matches: &[(u64, String)]) -> String {
 mod tests {
     use super::{
         connect_with_transport, fetch_search_results, parse_command, parse_decompile_target,
-        render_decompile_output, render_search_output, ParsedLine, ReplCommand,
+        render_callgraph_output, render_decompile_output, render_search_output, ParsedLine,
+        ReplCommand,
     };
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
@@ -566,6 +907,45 @@ mod tests {
         assert_eq!(
             parse_command("search objc_msgSend"),
             ParsedLine::Command(ReplCommand::Search("objc_msgSend".to_string()))
+        );
+        assert_eq!(
+            parse_command("cache stats"),
+            ParsedLine::Command(ReplCommand::CacheStats)
+        );
+        assert_eq!(
+            parse_command("cache clear"),
+            ParsedLine::Command(ReplCommand::CacheClear)
+        );
+    }
+
+    #[test]
+    fn parse_config_commands() {
+        assert_eq!(
+            parse_command("config set anthropic-api-key sk-ant-1234567890"),
+            ParsedLine::Command(ReplCommand::ConfigSet {
+                key: "anthropic-api-key".to_string(),
+                value: "sk-ant-1234567890".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_command("config get default-provider"),
+            ParsedLine::Command(ReplCommand::ConfigGet("default-provider".to_string()))
+        );
+        assert_eq!(
+            parse_command("config list"),
+            ParsedLine::Command(ReplCommand::ConfigList)
+        );
+    }
+
+    #[test]
+    fn parse_callgraph_command_with_and_without_depth() {
+        assert_eq!(
+            parse_command("callgraph sub_401000"),
+            ParsedLine::Command(ReplCommand::Callgraph("sub_401000".to_string(), None))
+        );
+        assert_eq!(
+            parse_command("callgraph 0x401000 5"),
+            ParsedLine::Command(ReplCommand::Callgraph("0x401000".to_string(), Some(5)))
         );
     }
 
@@ -727,5 +1107,85 @@ mod tests {
         assert!(rendered.contains("NSLog"));
 
         assert_eq!(mock.first_call_method().as_deref(), Some("find_regex"));
+    }
+
+    #[test]
+    fn callgraph_renders_tree_and_marks_recursive_edges() {
+        let runtime = Runtime::new();
+        assert!(runtime.is_ok());
+        let runtime = match runtime {
+            Ok(value) => value,
+            Err(err) => panic!("failed to create runtime: {err}"),
+        };
+
+        let mock = Arc::new(MockTransport::new(vec![
+            Ok(json!([
+                {
+                    "fn": {
+                        "addr": "0x401000",
+                        "name": "main",
+                        "size": "0x30"
+                    }
+                }
+            ])),
+            Ok(json!({
+                "edges": [
+                    ["0x401000", "0x401100"],
+                    ["0x401100", "0x401200"],
+                    ["0x401200", "0x401000"],
+                    ["0x401000", "0x402000"]
+                ]
+            })),
+            Ok(json!([
+                {
+                    "fn": {
+                        "addr": "0x401100",
+                        "name": "sub_401100",
+                        "size": "0x20"
+                    }
+                }
+            ])),
+            Ok(json!([
+                {
+                    "fn": {
+                        "addr": "0x401200",
+                        "name": "sub_401200",
+                        "size": "0x20"
+                    }
+                }
+            ])),
+            Ok(json!([
+                {
+                    "fn": {
+                        "addr": "0x402000",
+                        "name": "objc_msgSend",
+                        "size": "0x20"
+                    }
+                }
+            ])),
+        ]));
+
+        let client = IdaClient::with_transport("127.0.0.1", 13337, mock.clone());
+        let rendered = render_callgraph_output(&runtime, &client, "main", 3);
+        assert!(rendered.is_ok());
+        let rendered = match rendered {
+            Ok(value) => value,
+            Err(err) => panic!("unexpected error: {err}"),
+        };
+
+        assert!(rendered.contains("Call Graph: main @ 0x00401000 (depth=3)"));
+        assert!(rendered.contains("sub_401100 @ 0x00401100"));
+        assert!(rendered.contains("sub_401200 @ 0x00401200"));
+        assert!(rendered.contains("[recursive]"));
+        assert!(rendered.contains("objc_msgSend @ 0x00402000"));
+        assert!(rendered.contains("├──") || rendered.contains("└──"));
+
+        let methods = mock.call_methods();
+        assert_eq!(methods.first().map(String::as_str), Some("lookup_funcs"));
+        assert_eq!(methods.get(1).map(String::as_str), Some("callgraph"));
+        assert_eq!(
+            methods.iter().filter(|method| method.as_str() == "lookup_funcs").count(),
+            4
+        );
     }
 }
