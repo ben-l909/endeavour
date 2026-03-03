@@ -1,6 +1,14 @@
+//! Core types and utilities for Endeavour binary analysis.
+//!
+//! This crate provides configuration management, session persistence, and domain models
+//! for the Endeavour reverse engineering toolkit.
+
+/// Configuration management for Endeavour.
+
 pub mod config;
 /// Core error types.
 pub mod error;
+/// Binary loading and parsing utilities.
 pub mod loader;
 /// Core domain models.
 pub mod models;
