@@ -210,7 +210,11 @@ pub enum Stmt {
     Unknown {
         /// Backend opcode name.
         opcode: String,
-        /// Raw backend representation.
-        raw: String,
+        /// Optional destination value identifier.
+        dst: Option<ValueId>,
+        /// Backend argument expressions.
+        args: Vec<Expr>,
+        /// Optional backend-specific note.
+        note: Option<String>,
     },
 }
