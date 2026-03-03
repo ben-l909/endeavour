@@ -6,9 +6,6 @@ pub mod frontend;
 pub mod ir;
 
 pub use error::{IrError, Result};
-#[cfg(feature = "ida")]
-pub use frontend::{IdaFrontend, McpTransport};
-pub use frontend::{CapstoneFrontend, InstructionArch};
 pub use ir::{BinOp, Expr, Stmt, UnOp, ValueId, Width};
 
 /// Returns the crate package name.
