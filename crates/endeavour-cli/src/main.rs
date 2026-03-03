@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use endeavour_core::store::SessionStore;
 use endeavour_ida::IdaClient;
 use tracing::info;
@@ -47,6 +47,34 @@ enum Command {
         #[arg(default_value = "localhost:13337")]
         host: String,
     },
+    /// Manage OAuth authentication.
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
+}
+
+/// Subcommands under `auth`.
+#[derive(Debug, Subcommand)]
+enum AuthCommand {
+    /// Login with an OAuth provider.
+    Login {
+        /// Provider to authenticate with.
+        #[arg(long, value_enum)]
+        provider: AuthProvider,
+        /// Force OpenAI device flow.
+        #[arg(long, default_value_t = false)]
+        device: bool,
+    },
+}
+
+/// OAuth providers supported by the auth command.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum AuthProvider {
+    /// OpenAI GPT provider.
+    Gpt,
+    /// Anthropic Claude provider.
+    Claude,
 }
 
 /// Subcommands under `sessions`.
@@ -87,6 +115,39 @@ fn dispatch(cli: Cli) -> Result<()> {
             command: Some(SessionsCommand::Show { id }),
         }) => handle_sessions_show(store_path, id),
         Some(Command::ConnectIda { host }) => handle_connect_ida(host),
+        Some(Command::Auth {
+            command: AuthCommand::Login { provider, device },
+        }) => handle_auth_login(provider, device),
+    }
+}
+
+fn handle_auth_login(provider: AuthProvider, device: bool) -> Result<()> {
+    match provider {
+        AuthProvider::Gpt => {
+            if !device {
+                println!("Authenticating with OpenAI GPT...");
+                println!("Opening browser for authorization...");
+            }
+
+            let runtime = tokio::runtime::Runtime::new()
+                .context("failed to initialize tokio runtime for auth login")?;
+            match runtime.block_on(auth::openai_auth::login(device)) {
+                Ok(()) => {
+                    println!("✓ Authenticated with OpenAI GPT");
+                }
+                Err(error) => {
+                    eprintln!(
+                        "✗ error: OpenAI OAuth failed\n    ╰─ {}",
+                        error.user_message()
+                    );
+                }
+            }
+            Ok(())
+        }
+        AuthProvider::Claude => {
+            println!("Anthropic OAuth login is not available in this build.");
+            Ok(())
+        }
     }
 }
 
