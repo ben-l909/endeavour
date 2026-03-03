@@ -28,6 +28,8 @@ enum ReplCommand {
     Connect(Option<String>),
     IdaStatus,
     Decompile(String),
+    Rename(String, String),
+    Comment(String, String),
     Callgraph(String, Option<u32>),
     Search(String),
     Sessions,
@@ -91,6 +93,12 @@ impl Repl {
                     }
                     ParsedLine::Command(ReplCommand::Decompile(target)) => {
                         self.handle_decompile(&target);
+                    }
+                    ParsedLine::Command(ReplCommand::Rename(target, new_name)) => {
+                        self.handle_rename(&target, &new_name)?;
+                    }
+                    ParsedLine::Command(ReplCommand::Comment(target, comment)) => {
+                        self.handle_comment(&target, &comment)?;
                     }
                     ParsedLine::Command(ReplCommand::Callgraph(target, max_depth)) => {
                         self.handle_callgraph(&target, max_depth)?;
@@ -281,6 +289,50 @@ impl Repl {
         };
 
         println!("{}", render_decompile_result(&function_name, &result));
+    }
+
+    fn handle_rename(&self, target: &str, new_name: &str) -> Result<()> {
+        let Some(client) = self.ida_client.as_ref() else {
+            println!("Not connected. Run: connect <host:port>");
+            return Ok(());
+        };
+
+        let (address, _) = match resolve_target_address(&self.runtime, client.as_ref(), target) {
+            Ok(value) => value,
+            Err(_) => {
+                println!("No function at address");
+                return Ok(());
+            }
+        };
+
+        match rename_symbol(&self.runtime, client.as_ref(), address, new_name) {
+            Ok(()) => println!("Renamed {} → {}", fmt::format_addr(address), new_name),
+            Err(err) => println!("Failed to rename function: {err}"),
+        }
+
+        Ok(())
+    }
+
+    fn handle_comment(&self, target: &str, comment: &str) -> Result<()> {
+        let Some(client) = self.ida_client.as_ref() else {
+            println!("Not connected. Run: connect <host:port>");
+            return Ok(());
+        };
+
+        let (address, _) = match resolve_target_address(&self.runtime, client.as_ref(), target) {
+            Ok(value) => value,
+            Err(_) => {
+                println!("No function at address");
+                return Ok(());
+            }
+        };
+
+        match set_symbol_comment(&self.runtime, client.as_ref(), address, comment) {
+            Ok(()) => println!("Comment set at {}", fmt::format_addr(address)),
+            Err(err) => println!("Failed to set comment: {err}"),
+        }
+
+        Ok(())
     }
 
     fn handle_cache_stats(&self) -> Result<()> {
@@ -500,6 +552,33 @@ fn parse_command(line: &str) -> ParsedLine {
             Some(target) => ParsedLine::Command(ReplCommand::Decompile(target.to_string())),
             None => ParsedLine::InvalidUsage("decompile <addr>"),
         },
+        "rename" => {
+            let Some(target) = tokens.next() else {
+                return ParsedLine::InvalidUsage("rename <addr> <new_name>");
+            };
+
+            let Some(new_name) = tokens.next() else {
+                return ParsedLine::InvalidUsage("rename <addr> <new_name>");
+            };
+
+            if tokens.next().is_some() {
+                ParsedLine::InvalidUsage("rename <addr> <new_name>")
+            } else {
+                ParsedLine::Command(ReplCommand::Rename(target.to_string(), new_name.to_string()))
+            }
+        }
+        "comment" => {
+            let Some(target) = tokens.next() else {
+                return ParsedLine::InvalidUsage("comment <addr> <text...>");
+            };
+
+            let comment_tokens: Vec<&str> = tokens.collect();
+            if comment_tokens.is_empty() {
+                ParsedLine::InvalidUsage("comment <addr> <text...>")
+            } else {
+                ParsedLine::Command(ReplCommand::Comment(target.to_string(), comment_tokens.join(" ")))
+            }
+        }
         "callgraph" => {
             let Some(target) = tokens.next() else {
                 return ParsedLine::InvalidUsage("callgraph <addr> [depth]");
@@ -658,6 +737,8 @@ fn print_help() {
     println!("  connect [host:port]  Connect to IDA MCP (default: localhost:13337)");
     println!("  ida-status           Check IDA connection health");
     println!("  decompile <addr>     Decompile function (0x..., decimal, or sub_...)");
+    println!("  rename <addr> <new_name>  Rename function at address");
+    println!("  comment <addr> <text...>  Set comment at address");
     println!("  callgraph <addr> [depth]  Show call graph tree (default depth: 3)");
     println!("  search <pattern>     Search strings with regex pattern");
     println!("  sessions             List all sessions");
@@ -854,6 +935,18 @@ fn fetch_search_results(runtime: &Runtime, client: &IdaClient, pattern: &str) ->
         .with_context(|| format!("failed to search strings for pattern '{pattern}'"))
 }
 
+fn rename_symbol(runtime: &Runtime, client: &IdaClient, addr: u64, new_name: &str) -> Result<()> {
+    runtime
+        .block_on(client.rename_function(addr, new_name))
+        .with_context(|| format!("failed to rename function at {}", fmt::format_addr(addr)))
+}
+
+fn set_symbol_comment(runtime: &Runtime, client: &IdaClient, addr: u64, comment: &str) -> Result<()> {
+    runtime
+        .block_on(client.set_comment(addr, comment))
+        .with_context(|| format!("failed to set comment at {}", fmt::format_addr(addr)))
+}
+
 fn render_search_output(matches: &[(u64, String)]) -> String {
     let mut table = fmt::Table::new(vec![
         fmt::Column::new("Address", 18, fmt::Align::Left),
@@ -871,6 +964,7 @@ fn render_search_output(matches: &[(u64, String)]) -> String {
 mod tests {
     use super::{
         connect_with_transport, fetch_search_results, parse_command, parse_decompile_target,
+        rename_symbol, set_symbol_comment,
         render_callgraph_output, render_decompile_output, render_search_output, ParsedLine,
         ReplCommand,
     };
@@ -915,6 +1009,29 @@ mod tests {
         assert_eq!(
             parse_command("cache clear"),
             ParsedLine::Command(ReplCommand::CacheClear)
+        );
+        assert_eq!(
+            parse_command("rename 0x401000 main"),
+            ParsedLine::Command(ReplCommand::Rename("0x401000".to_string(), "main".to_string()))
+        );
+        assert_eq!(
+            parse_command("comment 0x401000 this is a note"),
+            ParsedLine::Command(ReplCommand::Comment(
+                "0x401000".to_string(),
+                "this is a note".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_rename_and_comment_usage_errors() {
+        assert_eq!(
+            parse_command("rename 0x401000"),
+            ParsedLine::InvalidUsage("rename <addr> <new_name>")
+        );
+        assert_eq!(
+            parse_command("comment 0x401000"),
+            ParsedLine::InvalidUsage("comment <addr> <text...>")
         );
     }
 
@@ -1187,5 +1304,39 @@ mod tests {
             methods.iter().filter(|method| method.as_str() == "lookup_funcs").count(),
             4
         );
+    }
+
+    #[test]
+    fn rename_symbol_calls_rename_method() {
+        let runtime = Runtime::new();
+        assert!(runtime.is_ok());
+        let runtime = match runtime {
+            Ok(value) => value,
+            Err(err) => panic!("failed to create runtime: {err}"),
+        };
+
+        let mock = Arc::new(MockTransport::new(vec![Ok(json!({"func": [{"ok": true}]}))]));
+        let client = IdaClient::with_transport("127.0.0.1", 13337, mock.clone());
+
+        let renamed = rename_symbol(&runtime, &client, 0x401000, "main");
+        assert!(renamed.is_ok());
+        assert_eq!(mock.first_call_method().as_deref(), Some("rename"));
+    }
+
+    #[test]
+    fn set_symbol_comment_calls_set_comments_method() {
+        let runtime = Runtime::new();
+        assert!(runtime.is_ok());
+        let runtime = match runtime {
+            Ok(value) => value,
+            Err(err) => panic!("failed to create runtime: {err}"),
+        };
+
+        let mock = Arc::new(MockTransport::new(vec![Ok(json!([{"ok": true}]))]));
+        let client = IdaClient::with_transport("127.0.0.1", 13337, mock.clone());
+
+        let commented = set_symbol_comment(&runtime, &client, 0x401000, "entry point");
+        assert!(commented.is_ok());
+        assert_eq!(mock.first_call_method().as_deref(), Some("set_comments"));
     }
 }
