@@ -4,10 +4,15 @@ version.workspace = true
 edition = "2021"
 license.workspace = true
 
+[features]
+default = []
+z3-verifier = ["z3"]
+
 [dependencies]
 endeavour-ir = { path = "../endeavour-ir" }
 rayon.workspace = true
 thiserror.workspace = true
+z3 = { version = "0.12", optional = true }
 
 [lints]
 workspace = true
