@@ -1,3 +1,5 @@
+#![allow(clippy::await_holding_lock)]
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{Mutex, OnceLock};
@@ -16,9 +18,14 @@ mod auth {
     pub mod storage {
         pub use endeavour_cli::auth::storage::*;
     }
+
+    pub fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        super::env_lock()
+    }
 }
 
 mod openai_harness {
+    #![allow(clippy::items_after_test_module)]
     #![allow(dead_code)]
 
     include!("../src/auth/openai_auth.rs");
@@ -126,8 +133,7 @@ async fn oauth_integration_anthropic_code_paste_flow_exchanges_and_stores_token(
         let (mut stream, _) = listener.accept().expect("accept token exchange");
         let request = read_http_request(&mut stream);
 
-        let body =
-            r#"{"access_token":"at_abc123","refresh_token":"rt_xyz789","expires_in":3600}"#;
+        let body = r#"{"access_token":"at_abc123","refresh_token":"rt_xyz789","expires_in":3600}"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
@@ -148,7 +154,8 @@ async fn oauth_integration_anthropic_code_paste_flow_exchanges_and_stores_token(
     );
 
     let verifier = "pkce-verifier-123".to_string();
-    let parsed = parse_callback_code("auth-code-1#pkce-verifier-123").expect("parse callback paste");
+    let parsed =
+        parse_callback_code("auth-code-1#pkce-verifier-123").expect("parse callback paste");
     assert_eq!(parsed.state, verifier);
 
     let exchanged = client
@@ -192,7 +199,10 @@ async fn oauth_integration_openai_localhost_callback_flow_stores_token() {
     set_auth_env(&temp);
 
     let callback_probe = TcpListener::bind("127.0.0.1:0").expect("bind callback probe");
-    let callback_port = callback_probe.local_addr().expect("callback local addr").port();
+    let callback_port = callback_probe
+        .local_addr()
+        .expect("callback local addr")
+        .port();
     drop(callback_probe);
 
     let token_listener = TcpListener::bind("127.0.0.1:0").expect("bind token server");
@@ -201,8 +211,7 @@ async fn oauth_integration_openai_localhost_callback_flow_stores_token() {
     let token_server = thread::spawn(move || {
         let (mut stream, _) = token_listener.accept().expect("accept token request");
         let request = read_http_request(&mut stream);
-        let body =
-            r#"{"access_token":"at_gpt123","refresh_token":"rt_gpt789","expires_in":3600}"#;
+        let body = r#"{"access_token":"at_gpt123","refresh_token":"rt_gpt789","expires_in":3600}"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
@@ -339,8 +348,7 @@ async fn oauth_integration_token_refresh_expired_token_triggers_refresh() {
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept refresh request");
         let request = read_http_request(&mut stream);
-        let body =
-            r#"{"access_token":"at_new123","refresh_token":"rt_new789","expires_in":3600}"#;
+        let body = r#"{"access_token":"at_new123","refresh_token":"rt_new789","expires_in":3600}"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),

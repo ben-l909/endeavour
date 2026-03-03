@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use rusqlite::{Connection, OptionalExtension, Row, params, types::Type};
+use rusqlite::{params, types::Type, Connection, OptionalExtension, Row};
 use uuid::Uuid;
 
 use crate::{

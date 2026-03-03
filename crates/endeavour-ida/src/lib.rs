@@ -10,5 +10,6 @@ pub mod types;
 pub use client::{HttpTransport, IdaClient, Transport};
 pub use error::{IdaError, Result};
 pub use types::{
-    BasicBlock, CommentRequest, DecompileResult, DisasmInstruction, FunctionInfo, RenameRequest, XRef,
+    BasicBlock, CommentRequest, DecompileResult, DisasmInstruction, FunctionInfo, RenameRequest,
+    XRef,
 };

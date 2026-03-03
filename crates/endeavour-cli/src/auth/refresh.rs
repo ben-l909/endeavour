@@ -172,7 +172,6 @@ fn current_unix_seconds() -> Result<u64, std::time::SystemTimeError> {
 mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener as StdTcpListener;
-    use std::sync::{Mutex, OnceLock};
     use std::thread;
 
     use reqwest::Client;
@@ -180,13 +179,6 @@ mod tests {
     use super::{is_expired, AuthProvider, RefreshAuthExpired};
     use crate::auth::refresh::ensure_fresh_token;
     use crate::auth::storage::{get_token, AuthMethod, TokenRecord};
-
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("env lock")
-    }
 
     #[test]
     fn expiry_detection_uses_epoch_seconds() {
@@ -197,8 +189,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn api_key_tokens_are_never_refreshed() {
-        let _guard = env_lock();
+        let _guard = crate::auth::test_env_lock();
         let client = Client::new();
         let record = TokenRecord {
             access_token: "sk-live".to_string(),
@@ -214,8 +207,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn refresh_failure_returns_reauth_prompt() {
-        let _guard = env_lock();
+        let _guard = crate::auth::test_env_lock();
         let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind mock server");
         let addr = listener.local_addr().expect("mock server addr");
         thread::spawn(move || {
@@ -255,8 +249,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn mock_refresh_endpoint_updates_token_record() {
-        let _guard = env_lock();
+        let _guard = crate::auth::test_env_lock();
         let temp = tempfile::tempdir().expect("tempdir");
         std::env::set_var("XDG_CONFIG_HOME", temp.path());
 

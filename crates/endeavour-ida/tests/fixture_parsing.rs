@@ -21,13 +21,14 @@ impl FixtureTransport {
 #[async_trait]
 impl Transport for FixtureTransport {
     async fn call(&self, _method: &str, _params: Value) -> Result<Value> {
-        let mut guard = self
-            .responses
-            .lock()
-            .map_err(|_| IdaError::IdaResponseError("FixtureTransport lock poisoned".to_string()))?;
-        guard
-            .pop_front()
-            .unwrap_or_else(|| Err(IdaError::IdaResponseError("No fixture response queued".to_string())))
+        let mut guard = self.responses.lock().map_err(|_| {
+            IdaError::IdaResponseError("FixtureTransport lock poisoned".to_string())
+        })?;
+        guard.pop_front().unwrap_or_else(|| {
+            Err(IdaError::IdaResponseError(
+                "No fixture response queued".to_string(),
+            ))
+        })
     }
 }
 
@@ -54,11 +55,17 @@ async fn decompile_fixtures_parse_with_expected_shapes() {
     ]));
     let client = IdaClient::with_transport("127.0.0.1", 13337, transport);
 
-    let success = client.decompile(0x100004a20).await.expect("success fixture should parse");
+    let success = client
+        .decompile(0x100004a20)
+        .await
+        .expect("success fixture should parse");
     assert_eq!(success.address, 0x100004a20);
     assert!(success.pseudocode.contains("parse_header"));
 
-    let complex = client.decompile(0x1000075d0).await.expect("complex fixture should parse");
+    let complex = client
+        .decompile(0x1000075d0)
+        .await
+        .expect("complex fixture should parse");
     assert_eq!(complex.address, 0x1000075d0);
     assert!(complex.pseudocode.contains("mba_score_block"));
     assert!(complex.pseudocode.contains("for (i = 0; i < 8; ++i)"));
@@ -75,12 +82,20 @@ async fn search_fixtures_parse_with_expected_shapes() {
     ]));
     let client = IdaClient::with_transport("127.0.0.1", 13337, transport);
 
-    let matches = client.find_strings("https?://").await.expect("matches fixture should parse");
+    let matches = client
+        .find_strings("https?://")
+        .await
+        .expect("matches fixture should parse");
     assert!(matches.len() >= 5);
     assert_eq!(matches[0].0, 0x100081020);
-    assert!(matches.iter().any(|(_, s)| s.contains("Authorization: Bearer")));
+    assert!(matches
+        .iter()
+        .any(|(_, s)| s.contains("Authorization: Bearer")));
 
-    let empty = client.find_strings("nomatch").await.expect("empty fixture should parse");
+    let empty = client
+        .find_strings("nomatch")
+        .await
+        .expect("empty fixture should parse");
     assert!(empty.is_empty());
 }
 

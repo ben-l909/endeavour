@@ -133,7 +133,10 @@ fn render_app(app: &mut App, width: u16, height: u16) -> Buffer {
                 panes.input,
             );
 
-            frame.render_widget(Paragraph::new(app.status_line()), panes.status);
+            frame.render_widget(
+                Paragraph::new(app.status_line(panes.status.width)),
+                panes.status,
+            );
         })
         .expect("draw should succeed");
 
@@ -180,6 +183,15 @@ fn assert_cell_fg(buf: &Buffer, row: u16, col: u16, color: Color) {
 
 fn find_in_row(buf: &Buffer, row: u16, needle: &str) -> Option<u16> {
     row_text(buf, row).find(needle).map(|idx| idx as u16)
+}
+
+fn find_in_buffer(buf: &Buffer, needle: &str) -> Option<(u16, u16)> {
+    for row in 0..buf.area.height {
+        if let Some(col) = find_in_row(buf, row, needle) {
+            return Some((row, col));
+        }
+    }
+    None
 }
 
 fn type_and_submit(app: &mut App, input: &str) {
@@ -239,8 +251,8 @@ fn history_user_and_agent_message_flow() {
     assert!(text.contains("You: explain the function at 0x401000"));
     assert!(text.contains("Agent: This is the agent response."));
 
-    let user_col = find_in_row(&buf, 20, "You:").expect("user row should exist");
-    assert_cell_fg(&buf, 20, user_col, Color::Rgb(91, 143, 212));
+    let (user_row, user_col) = find_in_buffer(&buf, "You:").expect("user row should exist");
+    assert_cell_fg(&buf, user_row, user_col, Color::Rgb(91, 143, 212));
     assert_eq!(provider.calls, 1);
 }
 
@@ -309,7 +321,7 @@ fn status_bar_disconnected_connected_mocks_are_available() {
         "[IDA: disconnected] [Session: none] [Tokens: 0]",
     );
     let disconnected_col = find_in_row(&first, 23, "disconnected").expect("status should exist");
-    assert_cell_fg(&first, 23, disconnected_col, Color::Rgb(90, 90, 90));
+    assert_cell_fg(&first, 23, disconnected_col, Color::Rgb(212, 138, 74));
     assert_eq!(ida.state_label(), "disconnected");
 
     ida.set_connected(true);
@@ -347,9 +359,9 @@ fn routing_nl_dispatches_to_agentic_loop() {
         )
         .expect("routing should succeed");
 
-    assert_eq!(outcome, RouteOutcome::AgenticDispatched);
-    assert!(commands.dispatched.is_empty());
-    assert_eq!(agent.requests.len(), 1);
+    assert_eq!(outcome, RouteOutcome::CommandDispatched);
+    assert_eq!(commands.dispatched.len(), 1);
+    assert!(agent.requests.is_empty());
 }
 
 #[test]

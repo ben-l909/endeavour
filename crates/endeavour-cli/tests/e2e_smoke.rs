@@ -39,7 +39,11 @@ fn setup_mock_smoke_test(
         .context("failed to create smoke test session")?;
 
     let provider = Arc::new(MockProvider::new(llm_responses));
-    let client = Arc::new(IdaClient::with_transport("127.0.0.1", 13337, transport.clone()));
+    let client = Arc::new(IdaClient::with_transport(
+        "127.0.0.1",
+        13337,
+        transport.clone(),
+    ));
     let executor = IdaToolExecutor::new(client);
     let context = ContextBuilder::new("claude-sonnet-4-5")
         .with_history(vec![Message {
@@ -146,7 +150,11 @@ async fn e2e_smoke_rename_single_function() {
             "I'll decompile this function to understand what it does.",
             312,
             28,
-            vec![tool_call("toolu_smoke_001", "decompile", json!({ "addr": "0x100004a20" }))],
+            vec![tool_call(
+                "toolu_smoke_001",
+                "decompile",
+                json!({ "addr": "0x100004a20" }),
+            )],
         ))),
         MockResponse::Completion(Ok(completion_with_tools(
             "The function XORs two inputs with a constant. I'll rename it to xor_obfuscate.",
@@ -347,7 +355,9 @@ async fn e2e_smoke_ida_disconnect_mid_pipeline() {
     assert_eq!(turn_two_tool_results[1].tool_use_id, "toolu_disc_002");
     assert!(!turn_two_tool_results[0].is_error);
     assert!(turn_two_tool_results[1].is_error);
-    assert!(turn_two_tool_results[1].content.contains("mock connection failed"));
+    assert!(turn_two_tool_results[1]
+        .content
+        .contains("mock connection failed"));
 
     assert_eq!(result.termination_reason, AgenticTerminationReason::Success);
     assert_eq!(harness.provider.call_count(), 2);
@@ -360,7 +370,10 @@ enum LiveProvider {
 
 #[async_trait]
 impl LlmProvider for LiveProvider {
-    async fn complete(&self, request: CompletionRequest) -> endeavour_llm::Result<CompletionResponse> {
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> endeavour_llm::Result<CompletionResponse> {
         match self {
             Self::Anthropic(provider) => provider.complete(request).await,
             Self::OpenAi(provider) => provider.complete(request).await,
@@ -384,7 +397,8 @@ struct Pricing {
 
 fn live_provider_from_env() -> Result<(LiveProvider, String, Pricing)> {
     if let Ok(key) = env::var("ANTHROPIC_API_KEY") {
-        let model = env::var("ENDEAVOUR_E2E_MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".to_string());
+        let model =
+            env::var("ENDEAVOUR_E2E_MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".to_string());
         return Ok((
             LiveProvider::Anthropic(AnthropicProvider::new(key)),
             model,
@@ -415,10 +429,12 @@ fn live_provider_from_env() -> Result<(LiveProvider, String, Pricing)> {
 }
 
 fn parse_host_port(value: &str) -> Result<(String, u16)> {
-    let (host, port) = value
-        .trim()
-        .rsplit_once(':')
-        .ok_or_else(|| anyhow!("invalid ENDEAVOUR_LIVE_IDA_HOST '{}': expected host:port", value))?;
+    let (host, port) = value.trim().rsplit_once(':').ok_or_else(|| {
+        anyhow!(
+            "invalid ENDEAVOUR_LIVE_IDA_HOST '{}': expected host:port",
+            value
+        )
+    })?;
     let parsed_port = port
         .parse::<u16>()
         .with_context(|| format!("invalid ENDEAVOUR_LIVE_IDA_HOST port '{}': not a u16", port))?;
@@ -430,8 +446,8 @@ fn parse_host_port(value: &str) -> Result<(String, u16)> {
 async fn e2e_smoke_live_ida_manual_harness() {
     let (provider, model, pricing) =
         live_provider_from_env().unwrap_or_else(|err| panic!("live smoke setup failed: {err}"));
-    let ida_endpoint = env::var("ENDEAVOUR_LIVE_IDA_HOST")
-        .unwrap_or_else(|_| "127.0.0.1:13337".to_string());
+    let ida_endpoint =
+        env::var("ENDEAVOUR_LIVE_IDA_HOST").unwrap_or_else(|_| "127.0.0.1:13337".to_string());
     let (host, port) =
         parse_host_port(&ida_endpoint).unwrap_or_else(|err| panic!("invalid live IDA host: {err}"));
 
@@ -477,7 +493,10 @@ async fn e2e_smoke_live_ida_manual_harness() {
         .any(|call| call.name == "rename_function");
 
     assert!(saw_decompile, "expected at least one decompile tool call");
-    assert!(saw_rename, "expected at least one rename_function tool call");
+    assert!(
+        saw_rename,
+        "expected at least one rename_function tool call"
+    );
     assert_eq!(
         result.termination_reason,
         AgenticTerminationReason::Success,

@@ -5,11 +5,11 @@ use crossterm::event::{
     Event as CrosstermEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
 };
 use futures_util::StreamExt;
-use ratatui::Terminal;
 use ratatui::backend::Backend;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::text::Text;
 use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::Terminal;
 use tokio::select;
 use tokio::sync::mpsc;
 use tokio::sync::watch;

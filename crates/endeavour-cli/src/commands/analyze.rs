@@ -124,13 +124,14 @@ pub(crate) fn handle_decompile(repl: &Repl, target: &str) {
         return;
     };
 
-    let (address, function_name) = match resolve_target_address(&repl.runtime, client.as_ref(), target) {
-        Ok(value) => value,
-        Err(_) => {
-            println!("No function at address");
-            return;
-        }
-    };
+    let (address, function_name) =
+        match resolve_target_address(&repl.runtime, client.as_ref(), target) {
+            Ok(value) => value,
+            Err(_) => {
+                println!("No function at address");
+                return;
+            }
+        };
 
     let session_id = repl.active_session.as_ref().map(|session| session.id);
     let cached_result = session_id
@@ -376,7 +377,8 @@ pub(crate) fn handle_review(repl: &mut Repl) -> Result<()> {
             }
             "r" => {
                 if let Some(first) = pending.first() {
-                    repl.store.update_review_queue_status(first.id, "rejected")?;
+                    repl.store
+                        .update_review_queue_status(first.id, "rejected")?;
                     log_review_rejected(&repl.store, session.id, first)?;
                     println!(
                         "\n  ✗ Rejected: {}  ->  {}  at {}",
@@ -557,14 +559,14 @@ fn handle_rename_llm_single(repl: &mut Repl, target: &str, command: &RenameComma
         return Ok(());
     };
 
-    let (function_addr, function_name) =
-        match resolve_target_address(&repl.runtime, client, target) {
-            Ok(value) => value,
-            Err(err) => {
-                println!("{}", format_resolve_target_error(target, &err));
-                return Ok(());
-            }
-        };
+    let (function_addr, function_name) = match resolve_target_address(&repl.runtime, client, target)
+    {
+        Ok(value) => value,
+        Err(err) => {
+            println!("{}", format_resolve_target_error(target, &err));
+            return Ok(());
+        }
+    };
 
     let decompile_result = match repl.runtime.block_on(client.decompile(function_addr)) {
         Ok(value) => value,
@@ -678,13 +680,8 @@ fn handle_rename_llm_single(repl: &mut Repl, target: &str, command: &RenameComma
         }
     };
 
-    let counters = apply_suggestions_and_render(
-        &repl.runtime,
-        &repl.store,
-        session.id,
-        client,
-        suggestions,
-    )?;
+    let counters =
+        apply_suggestions_and_render(&repl.runtime, &repl.store, session.id, client, suggestions)?;
     println!(
         "\n  Applied: {}   Queued: {}   Discarded: {}",
         counters.applied, counters.queued, counters.discarded
@@ -1020,17 +1017,19 @@ fn apply_review_item(repl: &Repl, session_id: uuid::Uuid, item: &ReviewQueueReco
     };
 
     let result = match item.kind.as_str() {
-        "function_rename" => repl.runtime.block_on(
-            client.rename_function(item.target_addr.unwrap_or(item.function_addr), &item.proposed_value),
-        ),
+        "function_rename" => repl.runtime.block_on(client.rename_function(
+            item.target_addr.unwrap_or(item.function_addr),
+            &item.proposed_value,
+        )),
         "variable_rename" => repl.runtime.block_on(client.rename_local(
             item.function_addr,
             &item.current_name,
             &item.proposed_value,
         )),
-        "comment" => repl.runtime.block_on(
-            client.set_comment(item.target_addr.unwrap_or(item.function_addr), &item.proposed_value),
-        ),
+        "comment" => repl.runtime.block_on(client.set_comment(
+            item.target_addr.unwrap_or(item.function_addr),
+            &item.proposed_value,
+        )),
         _ => Ok(()),
     };
 
@@ -1219,8 +1218,8 @@ async fn run_rename_agentic_loop<P: LlmProvider>(
 }
 
 fn parse_rename_json_payload(raw: &str) -> std::result::Result<RenameLlmResponse, String> {
-    let value: serde_json::Value =
-        serde_json::from_str(raw).map_err(|_| "Expected rename schema at top level.".to_string())?;
+    let value: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|_| "Expected rename schema at top level.".to_string())?;
     let object = value
         .as_object()
         .ok_or_else(|| "Expected rename schema at top level.".to_string())?;
@@ -1263,7 +1262,10 @@ fn build_suggestions(
             let _ = append_transcript_line(
                 store,
                 session_id,
-                format!("[SKIPPED] invalid identifier for function rename: '{}'", name),
+                format!(
+                    "[SKIPPED] invalid identifier for function rename: '{}'",
+                    name
+                ),
             );
         }
     }
@@ -1330,7 +1332,11 @@ fn build_suggestions(
     Ok(suggestions)
 }
 
-fn apply_suggestion(runtime: &Runtime, client: &IdaClient, suggestion: &RenameSuggestion) -> Result<()> {
+fn apply_suggestion(
+    runtime: &Runtime,
+    client: &IdaClient,
+    suggestion: &RenameSuggestion,
+) -> Result<()> {
     match suggestion.kind {
         RenameSuggestionKind::Function => runtime
             .block_on(client.rename_function(suggestion.target_addr, &suggestion.proposed_value))
@@ -1435,7 +1441,11 @@ fn persist_agentic_transcript(
     Ok(())
 }
 
-fn append_transcript_line(store: &SessionStore, session_id: uuid::Uuid, content: String) -> Result<()> {
+fn append_transcript_line(
+    store: &SessionStore,
+    session_id: uuid::Uuid,
+    content: String,
+) -> Result<()> {
     store.add_transcript_entries(
         session_id,
         &[NewTranscriptRecord {
@@ -1511,7 +1521,11 @@ fn log_review_rejected(
 
 fn render_decompile_result(function_name: &str, result: &DecompileResult) -> String {
     let mut lines = vec![
-        fmt::h2(format!("{} @ {}", function_name, fmt::format_addr(result.address))),
+        fmt::h2(format!(
+            "{} @ {}",
+            function_name,
+            fmt::format_addr(result.address)
+        )),
         fmt::separator(fmt::Separator::Standard, 88),
     ];
 

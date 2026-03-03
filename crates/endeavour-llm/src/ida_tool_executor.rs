@@ -295,13 +295,15 @@ impl IdaToolExecutor {
                         Ok(value) => value,
                         Err(message) => return invalid_args(tool_call, &message),
                     };
-                    error_result(
-                        tool_call,
-                        "unsupported_tool",
-                        "Variable rename is not supported by the current IDA client",
-                        json!({"old_name": old_name, "new_name": new_name, "confidence": confidence}),
-                        false,
-                    )
+                    match self.client.rename_variable(&old_name, &new_name).await {
+                        Ok(()) => ok_result(
+                            tool_call,
+                            "rename_variable_ok",
+                            "Variable renamed",
+                            json!({"old_name": old_name, "new_name": new_name, "confidence": confidence}),
+                        ),
+                        Err(err) => ida_error_result(tool_call, err),
+                    }
                 }
                 TOOL_SET_COMMENT => {
                     let addr = match required_addr(&tool_call.input, FIELD_ADDR) {

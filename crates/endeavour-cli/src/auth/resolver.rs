@@ -153,7 +153,7 @@ impl Provider {
         }
     }
 
-    fn config_key<'a>(self, config: &'a Config) -> Option<&'a str> {
+    fn config_key(self, config: &Config) -> Option<&str> {
         match self {
             Self::Anthropic => config.anthropic_api_key.as_deref(),
             Self::OpenAi => config.openai_api_key.as_deref(),
@@ -170,22 +170,13 @@ fn current_unix_seconds() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, OnceLock};
-
     use super::{AuthStatus, CredentialResolver};
     use crate::auth::storage::{set_token, AuthMethod, TokenRecord};
     use endeavour_core::config::Config;
 
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("env lock")
-    }
-
     #[test]
     fn resolves_env_var_when_oauth_missing() -> anyhow::Result<()> {
-        let _guard = env_lock();
+        let _guard = crate::auth::test_env_lock();
         let temp = tempfile::tempdir()?;
         std::env::set_var("HOME", temp.path());
         std::env::set_var("XDG_CONFIG_HOME", temp.path());
@@ -206,7 +197,7 @@ mod tests {
 
     #[test]
     fn resolves_oauth_before_env_var() -> anyhow::Result<()> {
-        let _guard = env_lock();
+        let _guard = crate::auth::test_env_lock();
         let temp = tempfile::tempdir()?;
         std::env::set_var("HOME", temp.path());
         std::env::set_var("XDG_CONFIG_HOME", temp.path());
@@ -236,7 +227,7 @@ mod tests {
 
     #[test]
     fn resolves_none_when_no_credentials_exist() -> anyhow::Result<()> {
-        let _guard = env_lock();
+        let _guard = crate::auth::test_env_lock();
         let temp = tempfile::tempdir()?;
         std::env::set_var("HOME", temp.path());
         std::env::set_var("XDG_CONFIG_HOME", temp.path());

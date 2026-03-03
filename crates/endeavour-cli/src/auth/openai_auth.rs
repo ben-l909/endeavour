@@ -655,9 +655,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn device_flow_exchanges_and_persists_token_with_mock_endpoints() {
+        let _guard = crate::auth::test_env_lock();
         let temp = tempfile::tempdir().expect("tempdir");
         std::env::set_var("XDG_CONFIG_HOME", temp.path());
+        std::env::set_var("HOME", temp.path());
 
         let poll_count = Arc::new(AtomicU32::new(0));
         let poll_count_clone = Arc::clone(&poll_count);
@@ -707,12 +710,16 @@ mod tests {
         assert!(record.expires_at.parse::<u64>().is_ok());
 
         std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("HOME");
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn browser_pkce_callback_exchanges_and_persists_token_with_mock_endpoint() {
+        let _guard = crate::auth::test_env_lock();
         let temp = tempfile::tempdir().expect("tempdir");
         std::env::set_var("XDG_CONFIG_HOME", temp.path());
+        std::env::set_var("HOME", temp.path());
 
         let callback_probe = StdTcpListener::bind("127.0.0.1:0").expect("bind callback probe");
         let callback_port = callback_probe
@@ -789,5 +796,6 @@ mod tests {
         assert!(record.expires_at.parse::<u64>().is_ok());
 
         std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("HOME");
     }
 }

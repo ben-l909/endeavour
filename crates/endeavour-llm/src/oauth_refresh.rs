@@ -265,6 +265,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn api_key_bypass_never_refreshes() {
         let _guard = env_lock();
         let temp = tempfile::tempdir().expect("tempdir");
@@ -287,6 +288,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn expired_oauth_is_refreshed_and_persisted() {
         let _guard = env_lock();
         let temp = tempfile::tempdir().expect("tempdir");
