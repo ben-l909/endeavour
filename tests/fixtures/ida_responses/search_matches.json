@@ -1,0 +1,28 @@
+{
+  "matches": [
+    {
+      "addr": "0x100081020",
+      "string": "https://api.internal.endeavourlabs.io/v2/auth/login"
+    },
+    {
+      "addr": "0x100081070",
+      "string": "https://api.internal.endeavourlabs.io/v2/users/profile"
+    },
+    {
+      "addr": "0x1000810b0",
+      "string": "Authorization: Bearer %s"
+    },
+    {
+      "addr": "0x1000810f8",
+      "string": "X-Endeavour-Trace: %08x"
+    },
+    {
+      "addr": "0x100081138",
+      "string": "POST /v2/telemetry/upload HTTP/1.1"
+    },
+    {
+      "addr": "0x100081188",
+      "string": "com.endeavourlabs.agent.mba.decoder"
+    }
+  ]
+}

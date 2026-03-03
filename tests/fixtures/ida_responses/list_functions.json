@@ -1,0 +1,59 @@
+[
+  {
+    "items": [
+      {
+        "addr": "0x100001000",
+        "name": "_start",
+        "size": "0x34"
+      },
+      {
+        "addr": "0x100001040",
+        "name": "_main",
+        "size": "0x9c"
+      },
+      {
+        "addr": "0x1000010e0",
+        "name": "_parse_config",
+        "size": "0x128"
+      },
+      {
+        "addr": "0x100001210",
+        "name": "_load_key_material",
+        "size": "0x88"
+      },
+      {
+        "addr": "0x1000012a0",
+        "name": "_validate_token",
+        "size": "0x15c"
+      },
+      {
+        "addr": "0x100001400",
+        "name": "_dispatch_command",
+        "size": "0xb4"
+      },
+      {
+        "addr": "0x1000014c0",
+        "name": "_mba_normalize",
+        "size": "0x1f0"
+      },
+      {
+        "addr": "0x1000016b0",
+        "name": "_decode_payload",
+        "size": "0x1a8"
+      },
+      {
+        "addr": "0x100001860",
+        "name": "_emit_trace_event",
+        "size": "0xd0"
+      },
+      {
+        "addr": "0x100001940",
+        "name": "_teardown_context",
+        "size": "0x64"
+      }
+    ],
+    "cursor": {
+      "done": true
+    }
+  }
+]

@@ -1,0 +1,14 @@
+[
+  {
+    "items": [
+      {
+        "addr": "0x100001040",
+        "name": "_main",
+        "size": "0x9c"
+      }
+    ],
+    "cursor": {
+      "done": true
+    }
+  }
+]
