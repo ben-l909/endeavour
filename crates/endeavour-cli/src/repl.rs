@@ -1146,11 +1146,11 @@ fn render_search_output(matches: &[(u64, String)]) -> String {
 mod tests {
     use super::{
         build_explain_request, complete_explain_request, connect_with_transport,
-        explain_api_key_hint, fetch_search_results, is_missing_function_error, parse_command, parse_decompile_target,
-        rename_symbol, resolve_target_address, set_symbol_comment,
-        format_resolve_target_error,
+        explain_api_key_hint, fetch_search_results, format_resolve_target_error,
+        is_missing_function_error, parse_command, parse_decompile_target, rename_symbol,
         render_callgraph_output, render_decompile_output, render_explain_result,
-        render_search_output, ParsedLine, ReplCommand,
+        render_search_output, resolve_target_address, set_symbol_comment, ParsedLine,
+        ReplCommand,
     };
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
