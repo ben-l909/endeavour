@@ -11,7 +11,7 @@ thiserror.workspace = true
 rusqlite.workspace = true
 uuid.workspace = true
 goblin.workspace = true
-memmap2 = "0.9"
+memmap2.workspace = true
 
 [lints]
 workspace = true

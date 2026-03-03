@@ -13,6 +13,9 @@ use crate::models::{Arch, Binary, ObjCClass, ObjCInfo, Section, Segment, Symbol,
 /// Load and parse a Mach-O binary from the given path.
 pub fn load_binary(path: &Path) -> Result<Binary> {
     let file = File::open(path)?;
+    // SAFETY: The file descriptor is opened read-only and the mapping is exposed
+    // as an immutable byte slice. The map is owned by this function and cannot
+    // outlive the Binary construction path that consumes it.
     let mmap = unsafe { MmapOptions::new().map(&file) }?;
     parse_macho(&mmap, path.to_path_buf())
 }
