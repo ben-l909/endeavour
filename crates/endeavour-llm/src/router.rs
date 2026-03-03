@@ -315,15 +315,8 @@ fn preferred_route(config: &Config, task_type: TaskType) -> (BackendProvider, St
     (provider, model)
 }
 
-fn task_override_model(config: &Config, task_type: TaskType) -> Option<String> {
-    match task_type {
-        TaskType::DeepAnalysis => config.routing.deep_analysis_model.clone(),
-        TaskType::CodeGeneration => config.routing.code_generation_model.clone(),
-        TaskType::FastRename => config.routing.fast_rename_model.clone(),
-        TaskType::Summarize => config.routing.summarize_model.clone(),
-        TaskType::Explain => config.routing.explain_model.clone(),
-        TaskType::Chat => config.routing.chat_model.clone(),
-    }
+fn task_override_model(_config: &Config, _task_type: TaskType) -> Option<String> {
+    None
 }
 
 fn model_for_provider(config: &Config, task_type: TaskType, provider: BackendProvider) -> String {
@@ -418,8 +411,6 @@ fn missing_provider_error(provider: ProviderSelection) -> LlmError {
 
 #[cfg(test)]
 mod tests {
-    use endeavour_core::config::RoutingConfig;
-
     use super::{BackendProvider, LlmRouter, ProviderSelection, RouterNotice, TaskType};
     use crate::LlmError;
 
@@ -495,14 +486,10 @@ mod tests {
     }
 
     #[test]
-    fn explain_model_override_is_applied() {
+    fn explain_uses_default_model_without_route_override_config() {
         let router = LlmRouter::new(
             endeavour_core::config::Config {
                 anthropic_api_key: Some("sk-ant-test".to_string()),
-                routing: RoutingConfig {
-                    explain_model: Some("claude-haiku-4-5".to_string()),
-                    ..RoutingConfig::default()
-                },
                 ..endeavour_core::config::Config::default()
             },
             TaskType::Explain,
@@ -514,6 +501,6 @@ mod tests {
             Ok(router) => router,
             Err(err) => panic!("unexpected router error: {err}"),
         };
-        assert_eq!(router.plan().model, "claude-haiku-4-5");
+        assert_eq!(router.plan().model, "claude-sonnet-4-5");
     }
 }

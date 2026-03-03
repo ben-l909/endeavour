@@ -6,9 +6,11 @@ use time::OffsetDateTime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
+    AgentMessageStart,
     AgentMessage(String),
     AgentMessageDelta(String),
     AgentMessageComplete,
+    Tick,
     SystemMessage(String),
     Quit,
 }
@@ -31,6 +33,7 @@ struct Message {
 struct StreamingMessage {
     content: String,
     timestamp: String,
+    wrap_width: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -43,7 +46,12 @@ pub struct HistoryView {
 pub struct App {
     input: String,
     messages: Vec<Message>,
+    is_agent_streaming: bool,
     streaming_agent: Option<StreamingMessage>,
+    spinner_index: usize,
+    spinner_elapsed_ms: u64,
+    stream_cursor_visible: bool,
+    stream_cursor_elapsed_ms: u64,
     scroll_offset: usize,
     auto_scroll: bool,
     unseen_count: usize,
@@ -105,9 +113,11 @@ impl App {
 
     pub fn reduce(&mut self, event: AppEvent) {
         match event {
+            AppEvent::AgentMessageStart => self.start_agent_stream(),
             AppEvent::AgentMessage(message) => self.push_message(MessageRole::Agent, message),
             AppEvent::AgentMessageDelta(chunk) => self.push_agent_stream_delta(chunk),
             AppEvent::AgentMessageComplete => self.complete_agent_stream(),
+            AppEvent::Tick => self.tick_streaming_animation(),
             AppEvent::SystemMessage(message) => self.push_message(MessageRole::System, message),
             AppEvent::Quit => {
                 self.should_quit = true;
@@ -117,22 +127,34 @@ impl App {
     }
 
     pub fn insert_char(&mut self, ch: char) {
+        if self.is_agent_streaming {
+            return;
+        }
         self.input.push(ch);
         self.dirty = true;
     }
 
     pub fn insert_newline(&mut self) {
+        if self.is_agent_streaming {
+            return;
+        }
         self.input.push('\n');
         self.dirty = true;
     }
 
     pub fn backspace(&mut self) {
+        if self.is_agent_streaming {
+            return;
+        }
         if self.input.pop().is_some() {
             self.dirty = true;
         }
     }
 
     pub fn clear_input(&mut self) {
+        if self.is_agent_streaming {
+            return;
+        }
         if !self.input.is_empty() {
             self.input.clear();
             self.dirty = true;
@@ -140,6 +162,9 @@ impl App {
     }
 
     pub fn submit(&mut self) {
+        if self.is_agent_streaming {
+            return;
+        }
         let submitted = self.input.trim().to_string();
         self.input.clear();
 
@@ -218,6 +243,38 @@ impl App {
         self.scroll_offset
     }
 
+    pub fn is_streaming(&self) -> bool {
+        self.is_agent_streaming
+    }
+
+    pub fn cancel_streaming(&mut self) {
+        if !self.is_agent_streaming {
+            return;
+        }
+
+        if self.streaming_agent.is_none() {
+            self.streaming_agent = Some(StreamingMessage {
+                content: String::new(),
+                timestamp: current_hhmm(),
+                wrap_width: self.current_stream_wrap_width(),
+            });
+            self.on_new_message();
+        }
+
+        if let Some(streaming) = self.streaming_agent.as_mut() {
+            let ends_with_whitespace = streaming
+                .content
+                .chars()
+                .last()
+                .is_some_and(char::is_whitespace);
+            if !streaming.content.is_empty() && !ends_with_whitespace {
+                streaming.content.push(' ');
+            }
+            streaming.content.push_str("[cancelled]");
+        }
+        self.complete_agent_stream();
+    }
+
     pub fn auto_scroll(&self) -> bool {
         self.auto_scroll
     }
@@ -274,15 +331,23 @@ impl App {
         if let Some(streaming) = &self.streaming_agent {
             lines.extend(render_streaming_message(
                 streaming,
-                width,
-                show_stream_cursor,
+                streaming.wrap_width.max(1),
+                show_stream_cursor && self.is_agent_streaming && self.stream_cursor_visible,
             ));
         }
         lines
     }
 
+    fn start_agent_stream(&mut self) {
+        self.is_agent_streaming = true;
+        self.stream_cursor_visible = true;
+        self.stream_cursor_elapsed_ms = 0;
+        self.spinner_elapsed_ms = 0;
+        self.dirty = true;
+    }
+
     fn push_message(&mut self, role: MessageRole, content: String) {
-        self.streaming_agent = None;
+        self.stop_agent_stream();
         self.messages.push(Message {
             role,
             content,
@@ -296,10 +361,15 @@ impl App {
             return;
         }
 
+        if !self.is_agent_streaming {
+            self.start_agent_stream();
+        }
+
         if self.streaming_agent.is_none() {
             self.streaming_agent = Some(StreamingMessage {
                 content: String::new(),
                 timestamp: current_hhmm(),
+                wrap_width: self.current_stream_wrap_width(),
             });
             self.on_new_message();
         }
@@ -312,12 +382,53 @@ impl App {
 
     fn complete_agent_stream(&mut self) {
         if let Some(streaming) = self.streaming_agent.take() {
-            self.messages.push(Message {
-                role: MessageRole::Agent,
-                content: streaming.content,
-                timestamp: streaming.timestamp,
-            });
-            self.dirty = true;
+            if !streaming.content.trim().is_empty() {
+                self.messages.push(Message {
+                    role: MessageRole::Agent,
+                    content: streaming.content,
+                    timestamp: streaming.timestamp,
+                });
+            }
+        }
+        self.stop_agent_stream();
+    }
+
+    fn stop_agent_stream(&mut self) {
+        self.is_agent_streaming = false;
+        self.stream_cursor_visible = false;
+        self.stream_cursor_elapsed_ms = 0;
+        self.spinner_elapsed_ms = 0;
+        self.spinner_index = 0;
+        self.dirty = true;
+    }
+
+    fn tick_streaming_animation(&mut self) {
+        if !self.is_agent_streaming {
+            return;
+        }
+
+        self.spinner_elapsed_ms = self.spinner_elapsed_ms.saturating_add(TICK_INTERVAL_MS);
+        while self.spinner_elapsed_ms >= SPINNER_INTERVAL_MS {
+            self.spinner_elapsed_ms -= SPINNER_INTERVAL_MS;
+            self.spinner_index = (self.spinner_index + 1) % SPINNER_FRAMES.len();
+        }
+
+        self.stream_cursor_elapsed_ms = self
+            .stream_cursor_elapsed_ms
+            .saturating_add(TICK_INTERVAL_MS);
+        while self.stream_cursor_elapsed_ms >= CURSOR_BLINK_INTERVAL_MS {
+            self.stream_cursor_elapsed_ms -= CURSOR_BLINK_INTERVAL_MS;
+            self.stream_cursor_visible = !self.stream_cursor_visible;
+        }
+
+        self.dirty = true;
+    }
+
+    fn current_stream_wrap_width(&self) -> u16 {
+        if self.history_view_width > 1 {
+            self.history_view_width as u16
+        } else {
+            DEFAULT_STREAM_WRAP_WIDTH
         }
     }
 
@@ -331,6 +442,16 @@ impl App {
     }
 
     pub fn input_lines(&self, width: u16) -> Vec<Line<'static>> {
+        if self.is_agent_streaming {
+            return vec![Line::from(vec![
+                Span::styled(
+                    format!("{} ", SPINNER_FRAMES[self.spinner_index]),
+                    Style::default().fg(amber()),
+                ),
+                Span::styled("Agent is thinking...", Style::default().fg(dim())),
+            ])];
+        }
+
         let prompt = "◆ ";
         let continuation = "  ";
         let available = width_for_input(width as usize, prompt.chars().count());
@@ -395,6 +516,7 @@ fn render_message_parts(
     let reserved_right = timestamp_reserved_width();
     let content_width = width_for_history(width as usize, prefix.chars().count(), reserved_right);
     let wrapped = wrap_text(content, content_width);
+    let last_line_index = wrapped.len().saturating_sub(1);
 
     wrapped
         .into_iter()
@@ -417,10 +539,10 @@ fn render_message_parts(
             };
 
             let mut spans = vec![Span::styled(current_prefix.to_string(), prefix_style)];
-            if show_cursor && idx == wrapped.len().saturating_sub(1) {
+            if show_cursor && idx == last_line_index {
                 spans.push(Span::styled(segment, content_style));
                 spans.push(Span::styled(
-                    "_",
+                    "▌",
                     Style::default()
                         .fg(chalk())
                         .add_modifier(Modifier::SLOW_BLINK),
@@ -456,6 +578,12 @@ fn format_timestamp(timestamp: &str) -> String {
         "00:00".to_string()
     }
 }
+
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER_INTERVAL_MS: u64 = 80;
+const CURSOR_BLINK_INTERVAL_MS: u64 = 500;
+const TICK_INTERVAL_MS: u64 = 16;
+const DEFAULT_STREAM_WRAP_WIDTH: u16 = 80;
 
 fn current_hhmm() -> String {
     let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
@@ -691,11 +819,12 @@ mod tests {
     #[test]
     fn streaming_message_shows_cursor_until_completed() {
         let mut app = App::new();
+        app.reduce(AppEvent::AgentMessageStart);
         app.reduce(AppEvent::AgentMessageDelta("partial".to_string()));
         let streaming = app.history_lines(80);
         assert!(streaming
             .iter()
-            .any(|line| line.to_string().contains("Agent: partial_")));
+            .any(|line| line.to_string().contains("Agent: partial▌")));
 
         app.reduce(AppEvent::AgentMessageComplete);
         let completed = app.history_lines(80);
@@ -704,7 +833,90 @@ mod tests {
             .any(|line| line.to_string().contains("Agent: partial")));
         assert!(completed
             .iter()
-            .all(|line| !line.to_string().contains("partial_")));
+            .all(|line| !line.to_string().contains("partial▌")));
+    }
+
+    #[test]
+    fn blocks_input_and_shows_thinking_indicator_while_streaming() {
+        let mut app = App::new();
+        app.insert_char('x');
+        app.reduce(AppEvent::AgentMessageStart);
+
+        app.insert_char('y');
+        app.backspace();
+        app.insert_newline();
+        app.clear_input();
+        app.submit();
+
+        assert_eq!(app.input(), "x");
+
+        let input_line = app.input_lines(80);
+        let rendered = input_line
+            .first()
+            .map(ToString::to_string)
+            .expect("expected one thinking indicator line");
+        assert!(rendered.contains("Agent is thinking..."));
+        assert!(rendered.contains("⠋"));
+    }
+
+    #[test]
+    fn tick_advances_spinner_and_cursor_animation() {
+        let mut app = App::new();
+        app.reduce(AppEvent::AgentMessageStart);
+        app.reduce(AppEvent::AgentMessageDelta("hi".to_string()));
+
+        let initial = app.history_lines(80);
+        assert!(initial
+            .iter()
+            .any(|line| line.to_string().contains("Agent: hi▌")));
+
+        for _ in 0..32 {
+            app.reduce(AppEvent::Tick);
+        }
+
+        let blinked = app.history_lines(80);
+        assert!(blinked
+            .iter()
+            .all(|line| !line.to_string().contains("Agent: hi▌")));
+
+        for _ in 0..5 {
+            app.reduce(AppEvent::Tick);
+        }
+
+        let input_line = app.input_lines(80);
+        let rendered = input_line
+            .first()
+            .map(ToString::to_string)
+            .expect("expected one spinner line");
+        assert!(!rendered.contains("⠋ Agent is thinking..."));
+    }
+
+    #[test]
+    fn cancelling_stream_appends_cancelled_marker() {
+        let mut app = App::new();
+        app.reduce(AppEvent::AgentMessageStart);
+        app.reduce(AppEvent::AgentMessageDelta("working".to_string()));
+
+        app.cancel_streaming();
+
+        assert!(!app.is_streaming());
+        let lines = app.history_lines(80);
+        assert!(lines
+            .iter()
+            .any(|line| line.to_string().contains("Agent: working [cancelled]")));
+    }
+
+    #[test]
+    fn completion_discards_whitespace_only_streamed_messages() {
+        let mut app = App::new();
+        app.reduce(AppEvent::AgentMessageStart);
+        app.reduce(AppEvent::AgentMessageDelta("   ".to_string()));
+        app.reduce(AppEvent::AgentMessageComplete);
+
+        let lines = app.history_lines(80);
+        assert!(lines
+            .iter()
+            .all(|line| !line.to_string().contains("Agent:")));
     }
 
     #[test]

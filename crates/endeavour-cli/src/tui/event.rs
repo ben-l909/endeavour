@@ -12,6 +12,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Terminal;
 use tokio::select;
 use tokio::sync::mpsc;
+use tokio::sync::watch;
 use tokio::time;
 
 use super::app::{App, AppEvent};
@@ -20,15 +21,18 @@ pub async fn run_event_loop<B: Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     mut app_events: mpsc::Receiver<AppEvent>,
+    stream_cancel_signal: Option<watch::Sender<bool>>,
 ) -> io::Result<()> {
     let mut terminal_events = EventStream::new();
-    let mut tick = time::interval(Duration::from_millis(33));
+    let mut tick = time::interval(Duration::from_millis(16));
 
     while !app.should_quit() {
         select! {
             maybe_event = terminal_events.next() => {
                 match maybe_event {
-                    Some(Ok(event)) => handle_terminal_event(app, event),
+                    Some(Ok(event)) => {
+                        handle_terminal_event(app, event, stream_cancel_signal.as_ref())
+                    }
                     Some(Err(error)) => {
                         return Err(io::Error::other(format!("terminal event stream failed: {error}")));
                     }
@@ -41,7 +45,7 @@ pub async fn run_event_loop<B: Backend>(
                     None => app.reduce(AppEvent::Quit),
                 }
             }
-            _ = tick.tick() => {}
+            _ = tick.tick() => app.reduce(AppEvent::Tick)
         }
 
         if app.is_dirty() {
@@ -98,20 +102,35 @@ pub async fn run_event_loop<B: Backend>(
     Ok(())
 }
 
-fn handle_terminal_event(app: &mut App, event: CrosstermEvent) {
+fn handle_terminal_event(
+    app: &mut App,
+    event: CrosstermEvent,
+    stream_cancel_signal: Option<&watch::Sender<bool>>,
+) {
     if let CrosstermEvent::Key(key) = event {
         if key.kind == KeyEventKind::Release {
             return;
         }
-        handle_key_event(app, key);
+        handle_key_event(app, key, stream_cancel_signal);
     }
 }
 
-fn handle_key_event(app: &mut App, key: KeyEvent) {
+fn handle_key_event(
+    app: &mut App,
+    key: KeyEvent,
+    stream_cancel_signal: Option<&watch::Sender<bool>>,
+) {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Char('c') => {
-                app.reduce(AppEvent::Quit);
+                if app.is_streaming() {
+                    if let Some(cancel_signal) = stream_cancel_signal {
+                        let _ = cancel_signal.send(true);
+                    }
+                    app.cancel_streaming();
+                } else {
+                    app.reduce(AppEvent::Quit);
+                }
                 return;
             }
             KeyCode::Char('d') => {
