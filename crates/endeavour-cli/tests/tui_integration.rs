@@ -359,9 +359,9 @@ fn routing_nl_dispatches_to_agentic_loop() {
         )
         .expect("routing should succeed");
 
-    assert_eq!(outcome, RouteOutcome::CommandDispatched);
-    assert_eq!(commands.dispatched.len(), 1);
-    assert!(agent.requests.is_empty());
+    assert_eq!(outcome, RouteOutcome::AgenticDispatched);
+    assert!(commands.dispatched.is_empty());
+    assert_eq!(agent.requests.len(), 1);
 }
 
 #[test]

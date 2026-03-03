@@ -175,14 +175,86 @@ impl IntentRouter {
 fn detect_command(input: &str) -> Option<String> {
     let stripped = input.trim_start_matches('/');
     let keyword = stripped.split_whitespace().next()?;
-    if KNOWN_COMMAND_KEYWORDS
+    
+    // Check if keyword is a known command
+    if !KNOWN_COMMAND_KEYWORDS
         .iter()
         .any(|known| keyword.eq_ignore_ascii_case(known))
     {
-        Some(stripped.to_string())
-    } else {
-        None
+        return None;
     }
+    
+    // If input starts with '/', it's an explicit command
+    if input.trim_start().starts_with('/') {
+        return Some(stripped.to_string());
+    }
+    
+    // For non-slash inputs, check if the remaining text looks like command args
+    // or natural language. If it's a bare keyword or has command-like args, it's a command.
+    let remaining = stripped[keyword.len()..].trim();
+    
+    // Bare keyword (no args) is a command
+    if remaining.is_empty() {
+        return Some(stripped.to_string());
+    }
+    
+    // Check if remaining text looks like command arguments (not natural language)
+    // Command args typically: addresses (0x...), function names, simple identifiers
+    // Natural language: multiple words, articles, prepositions, etc.
+    if looks_like_command_args(remaining) {
+        return Some(stripped.to_string());
+    }
+    
+    // Otherwise, it's natural language containing a keyword
+    None
+}
+
+fn looks_like_command_args(text: &str) -> bool {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    
+    // Single word that looks like an address or identifier
+    if words.len() == 1 {
+        let word = words[0];
+        // Addresses like 0x401000
+        if word.starts_with("0x") || word.starts_with("0X") {
+            return true;
+        }
+        // Function names like sub_401000 or identifiers
+        if word.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return true;
+        }
+        // Colon-separated like localhost:13337
+        if word.contains(':') {
+            return true;
+        }
+        return true; // Single word is likely a command arg
+    }
+    
+    // Two words: could be command args like "sub_401000 aes_key_schedule"
+    if words.len() == 2 {
+        // Both look like identifiers/addresses
+        if words.iter().all(|w| {
+            w.starts_with("0x") || w.starts_with("0X") ||
+            w.chars().all(|c| c.is_alphanumeric() || c == '_')
+        }) {
+            return true;
+        }
+    }
+    
+    // Multiple words with articles, prepositions, or common NL patterns
+    let lower = text.to_ascii_lowercase();
+    let nl_indicators = [
+        "the ", "a ", "an ", "and ", "or ", "at ", "in ", "on ", "to ",
+        "for ", "with ", "from ", "by ", "of ", "is ", "are ", "can ",
+        "could ", "would ", "should ", "what ", "how ", "why ", "where ",
+    ];
+    
+    if nl_indicators.iter().any(|indicator| lower.contains(indicator)) {
+        return false; // Looks like natural language
+    }
+    
+    // Default: if multiple words without clear NL markers, assume command args
+    words.len() <= 3
 }
 
 fn requires_current_function(input: &str) -> bool {
@@ -421,5 +493,93 @@ mod tests {
         );
         assert!(command_handler.dispatched.is_empty());
         assert!(agentic_handler.requests.is_empty());
+    }
+
+    #[test]
+    fn bare_command_keyword_is_dispatched_as_command() {
+        let mut controller = controller();
+        let mut command_handler = RecordingCommandHandler::default();
+        let mut agentic_handler = RecordingAgenticHandler::default();
+
+        let router = IntentRouter::new();
+        let outcome = router
+            .route(
+                "explain",
+                IntentSessionContext::default(),
+                &mut controller,
+                &mut command_handler,
+                &mut agentic_handler,
+            )
+            .unwrap_or_else(|err| panic!("unexpected routing error: {err}"));
+
+        assert_eq!(outcome, RouteOutcome::CommandDispatched);
+        assert_eq!(command_handler.dispatched, vec!["explain"]);
+        assert!(agentic_handler.requests.is_empty());
+    }
+
+    #[test]
+    fn nl_sentence_with_command_keyword_routes_to_agentic() {
+        let mut controller = controller();
+        let mut command_handler = RecordingCommandHandler::default();
+        let mut agentic_handler = RecordingAgenticHandler::default();
+
+        let router = IntentRouter::new();
+        let outcome = router
+            .route(
+                "explain the function at 0x401000",
+                IntentSessionContext::default(),
+                &mut controller,
+                &mut command_handler,
+                &mut agentic_handler,
+            )
+            .unwrap_or_else(|err| panic!("unexpected routing error: {err}"));
+
+        assert_eq!(outcome, RouteOutcome::AgenticDispatched);
+        assert!(command_handler.dispatched.is_empty());
+        assert_eq!(agentic_handler.requests.len(), 1);
+    }
+
+    #[test]
+    fn connect_with_address_is_command() {
+        let mut controller = controller();
+        let mut command_handler = RecordingCommandHandler::default();
+        let mut agentic_handler = RecordingAgenticHandler::default();
+
+        let router = IntentRouter::new();
+        let outcome = router
+            .route(
+                "connect localhost:13337",
+                IntentSessionContext::default(),
+                &mut controller,
+                &mut command_handler,
+                &mut agentic_handler,
+            )
+            .unwrap_or_else(|err| panic!("unexpected routing error: {err}"));
+
+        assert_eq!(outcome, RouteOutcome::CommandDispatched);
+        assert_eq!(command_handler.dispatched, vec!["connect localhost:13337"]);
+        assert!(agentic_handler.requests.is_empty());
+    }
+
+    #[test]
+    fn nl_sentence_with_connect_keyword_routes_to_agentic() {
+        let mut controller = controller();
+        let mut command_handler = RecordingCommandHandler::default();
+        let mut agentic_handler = RecordingAgenticHandler::default();
+
+        let router = IntentRouter::new();
+        let outcome = router
+            .route(
+                "connect the dots between these functions",
+                IntentSessionContext::default(),
+                &mut controller,
+                &mut command_handler,
+                &mut agentic_handler,
+            )
+            .unwrap_or_else(|err| panic!("unexpected routing error: {err}"));
+
+        assert_eq!(outcome, RouteOutcome::AgenticDispatched);
+        assert!(command_handler.dispatched.is_empty());
+        assert_eq!(agentic_handler.requests.len(), 1);
     }
 }
