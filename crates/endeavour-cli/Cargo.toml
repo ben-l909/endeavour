@@ -16,10 +16,15 @@ tracing-subscriber.workspace = true
 reedline.workspace = true
 owo-colors.workspace = true
 unicode-width.workspace = true
+tokio.workspace = true
+uuid.workspace = true
 endeavour-core = { path = "../endeavour-core" }
+endeavour-ida = { path = "../endeavour-ida" }
 
 [dev-dependencies]
 assert_cmd = "2"
+async-trait.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

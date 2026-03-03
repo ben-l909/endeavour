@@ -1,9 +1,12 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use endeavour_core::store::SessionStore;
 use endeavour_core::{loader, Session};
+use endeavour_ida::{IdaClient, Transport};
 use reedline::{DefaultPrompt, DefaultPromptSegment, FileBackedHistory, Reedline, Signal};
+use tokio::runtime::Runtime;
 
 const HISTORY_CAPACITY: usize = 500;
 
@@ -11,12 +14,16 @@ pub struct Repl {
     editor: Reedline,
     store: SessionStore,
     active_session: Option<Session>,
+    ida_client: Option<Arc<IdaClient>>,
+    runtime: Runtime,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum ReplCommand {
     Help,
     Analyze(String),
+    Connect(Option<String>),
+    IdaStatus,
     Sessions,
     Session(String),
     Info,
@@ -33,12 +40,16 @@ enum ParsedLine {
 }
 
 impl Repl {
-    pub fn new(store: SessionStore) -> Self {
-        Self {
+    pub fn new(store: SessionStore) -> Result<Self> {
+        let runtime = Runtime::new().context("failed to initialize tokio runtime for REPL")?;
+
+        Ok(Self {
             editor: Reedline::create(),
             store,
             active_session: None,
-        }
+            ida_client: None,
+            runtime,
+        })
     }
 
     pub fn run(&mut self) -> Result<()> {
@@ -60,6 +71,12 @@ impl Repl {
                     ParsedLine::Command(ReplCommand::Help) => print_help(),
                     ParsedLine::Command(ReplCommand::Analyze(path)) => {
                         self.handle_analyze(&path)?;
+                    }
+                    ParsedLine::Command(ReplCommand::Connect(target)) => {
+                        self.handle_connect(target.as_deref())?;
+                    }
+                    ParsedLine::Command(ReplCommand::IdaStatus) => {
+                        self.handle_ida_status()?;
                     }
                     ParsedLine::Command(ReplCommand::Sessions) => {
                         self.handle_sessions()?;
@@ -90,10 +107,17 @@ impl Repl {
     }
 
     fn prompt(&self) -> DefaultPrompt {
-        let prompt_name = match &self.active_session {
-            Some(session) => format!("[{}]", session.name),
-            None => "endeavour".to_string(),
-        };
+        let mut prompt_name = String::from("endeavour");
+
+        if let Some(session) = &self.active_session {
+            prompt_name.push('[');
+            prompt_name.push_str(&session.name);
+            prompt_name.push(']');
+        }
+
+        if self.ida_client.is_some() {
+            prompt_name.push_str("[ida]");
+        }
 
         DefaultPrompt::new(
             DefaultPromptSegment::Basic(prompt_name),
@@ -124,6 +148,55 @@ impl Repl {
         );
 
         self.active_session = Some(session);
+        Ok(())
+    }
+
+    fn handle_connect(&mut self, endpoint: Option<&str>) -> Result<()> {
+        let endpoint = endpoint.unwrap_or("localhost:13337");
+        let (host, port) = parse_host_port(endpoint)?;
+        let normalized_endpoint = format!("{host}:{port}");
+
+        let (client, functions) = connect_with_transport(
+            &self.runtime,
+            &normalized_endpoint,
+            Arc::new(endeavour_ida::HttpTransport::new(&host, port)),
+        )?;
+
+        self.ida_client = Some(client);
+        save_ida_endpoint(&normalized_endpoint)?;
+
+        if let Some(function) = functions.first() {
+            println!(
+                "Connected to IDA at {normalized_endpoint}. Sample function: {} @ 0x{:x}",
+                function.name, function.address
+            );
+        } else {
+            println!("Connected to IDA at {normalized_endpoint}. No functions returned.");
+        }
+
+        Ok(())
+    }
+
+    fn handle_ida_status(&self) -> Result<()> {
+        let Some(client) = self.ida_client.as_ref() else {
+            println!("Not connected. Run: connect <host:port>");
+            return Ok(());
+        };
+
+        let functions = self
+            .runtime
+            .block_on(client.list_functions(None, Some(1)))
+            .context("failed to query IDA status")?;
+
+        if let Some(function) = functions.first() {
+            println!(
+                "IDA connection active (sample function: {} @ 0x{:x})",
+                function.name, function.address
+            );
+        } else {
+            println!("IDA connection active (no functions returned).");
+        }
+
         Ok(())
     }
 
@@ -231,6 +304,11 @@ fn parse_command(line: &str) -> ParsedLine {
                 ParsedLine::Command(ReplCommand::Analyze(path_tokens.join(" ")))
             }
         }
+        "connect" => {
+            let target = tokens.next().map(ToString::to_string);
+            ParsedLine::Command(ReplCommand::Connect(target))
+        }
+        "ida-status" => ParsedLine::Command(ReplCommand::IdaStatus),
         "sessions" => ParsedLine::Command(ReplCommand::Sessions),
         "session" => match tokens.next() {
             Some(id) => ParsedLine::Command(ReplCommand::Session(id.to_string())),
@@ -263,10 +341,58 @@ fn history_path() -> Result<PathBuf> {
     Ok(app_dir.join("history.txt"))
 }
 
+fn parse_host_port(value: &str) -> Result<(String, u16)> {
+    let trimmed = value.trim();
+    let (host, port_text) = trimmed
+        .rsplit_once(':')
+        .with_context(|| format!("invalid host:port '{trimmed}'"))?;
+
+    if host.is_empty() {
+        return Err(anyhow::anyhow!("host must not be empty"));
+    }
+
+    let port = port_text
+        .parse::<u16>()
+        .with_context(|| format!("invalid port '{port_text}' in '{trimmed}'"))?;
+
+    Ok((host.to_string(), port))
+}
+
+fn save_ida_endpoint(endpoint: &str) -> Result<()> {
+    let path = PathBuf::from(std::env::var_os("HOME").context("HOME environment variable is not set")?)
+        .join(".endeavour")
+        .join("ida_endpoint");
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+    }
+
+    std::fs::write(&path, endpoint)
+        .with_context(|| format!("failed to write IDA endpoint config at {}", path.display()))
+}
+
+fn connect_with_transport(
+    runtime: &Runtime,
+    endpoint: &str,
+    transport: Arc<dyn Transport>,
+) -> Result<(Arc<IdaClient>, Vec<endeavour_ida::FunctionInfo>)> {
+    let (host, port) = parse_host_port(endpoint)?;
+    let client = Arc::new(IdaClient::with_transport(&host, port, transport));
+
+    let functions = runtime
+        .block_on(client.list_functions(None, Some(1)))
+        .with_context(|| format!("failed to connect to IDA at {host}:{port}"))?;
+
+    Ok((client, functions))
+}
+
 fn print_help() {
     println!("Available commands:");
     println!("  help                 Show this help message");
     println!("  analyze <path>       Load a Mach-O binary and create a session");
+    println!("  connect [host:port]  Connect to IDA MCP (default: localhost:13337)");
+    println!("  ida-status           Check IDA connection health");
     println!("  sessions             List all sessions");
     println!("  session <id>         Switch active session");
     println!("  info                 Show active session info");
@@ -277,6 +403,15 @@ fn print_help() {
 #[cfg(test)]
 mod tests {
     use super::{parse_command, ParsedLine, ReplCommand};
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use endeavour_ida::{IdaClient, IdaError, Transport};
+    use serde_json::{json, Value};
+    use tokio::runtime::Runtime;
+
+    use super::connect_with_transport;
 
     #[test]
     fn parse_analyze_command_with_path() {
@@ -284,5 +419,85 @@ mod tests {
             parse_command("analyze foo.bin"),
             ParsedLine::Command(ReplCommand::Analyze("foo.bin".to_string()))
         );
+    }
+
+    #[test]
+    fn parse_connect_command_without_endpoint() {
+        assert_eq!(
+            parse_command("connect"),
+            ParsedLine::Command(ReplCommand::Connect(None))
+        );
+    }
+
+    struct MockTransport {
+        responses: Mutex<VecDeque<std::result::Result<Value, IdaError>>>,
+        calls: Mutex<Vec<(String, Value)>>,
+    }
+
+    impl MockTransport {
+        fn new(responses: Vec<std::result::Result<Value, IdaError>>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into()),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn first_call_method(&self) -> Option<String> {
+            let guard = self.calls.lock().ok()?;
+            guard.first().map(|(method, _)| method.clone())
+        }
+    }
+
+    #[async_trait]
+    impl Transport for MockTransport {
+        async fn call(&self, method: &str, params: Value) -> Result<Value, endeavour_ida::IdaError> {
+            if let Ok(mut calls) = self.calls.lock() {
+                calls.push((method.to_string(), params));
+            }
+
+            let mut queue = self.responses.lock().map_err(|_| {
+                endeavour_ida::IdaError::IdaResponseError("mock lock poisoned".to_string())
+            })?;
+
+            queue.pop_front().unwrap_or_else(|| {
+                Err(endeavour_ida::IdaError::IdaResponseError(
+                    "no mock response queued".to_string(),
+                ))
+            })
+        }
+    }
+
+    #[test]
+    fn connect_flow_uses_list_functions_with_mock_transport() {
+        let runtime = Runtime::new();
+        assert!(runtime.is_ok());
+        let runtime = match runtime {
+            Ok(value) => value,
+            Err(err) => panic!("failed to create runtime: {err}"),
+        };
+
+        let mock = Arc::new(MockTransport::new(vec![Ok(json!([
+            {
+                "items": [
+                    {"addr": "0x401000", "name": "sub_401000", "size": "0x10"}
+                ],
+                "cursor": {"done": true}
+            }
+        ]))]));
+
+        let result = connect_with_transport(&runtime, "localhost:13337", mock.clone());
+        assert!(result.is_ok());
+
+        let method = mock.first_call_method();
+        assert_eq!(method.as_deref(), Some("list_funcs"));
+
+        let (client, functions) = match result {
+            Ok(value) => value,
+            Err(err) => panic!("unexpected error: {err}"),
+        };
+
+        let _typed: Arc<IdaClient> = client;
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "sub_401000");
     }
 }

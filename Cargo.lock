@@ -344,13 +344,18 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "async-trait",
  "clap",
  "endeavour-core",
+ "endeavour-ida",
  "owo-colors",
  "reedline",
+ "serde_json",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "unicode-width 0.2.2",
+ "uuid",
 ]
 
 [[package]]
