@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::fmt;
 use anyhow::{Context, Result};
 use endeavour_core::store::SessionStore;
 use endeavour_core::{loader, Session};
@@ -24,6 +25,8 @@ enum ReplCommand {
     Analyze(String),
     Connect(Option<String>),
     IdaStatus,
+    Decompile(String),
+    Search(String),
     Sessions,
     Session(String),
     Info,
@@ -77,6 +80,12 @@ impl Repl {
                     }
                     ParsedLine::Command(ReplCommand::IdaStatus) => {
                         self.handle_ida_status()?;
+                    }
+                    ParsedLine::Command(ReplCommand::Decompile(target)) => {
+                        self.handle_decompile(&target);
+                    }
+                    ParsedLine::Command(ReplCommand::Search(pattern)) => {
+                        self.handle_search(&pattern)?;
                     }
                     ParsedLine::Command(ReplCommand::Sessions) => {
                         self.handle_sessions()?;
@@ -200,6 +209,36 @@ impl Repl {
         Ok(())
     }
 
+    fn handle_decompile(&self, target: &str) {
+        let Some(client) = self.ida_client.as_ref() else {
+            println!("Not connected. Run: connect <host:port>");
+            return;
+        };
+
+        match render_decompile_output(&self.runtime, client.as_ref(), target) {
+            Ok(output) => println!("{output}"),
+            Err(_) => println!("No function at address"),
+        }
+    }
+
+    fn handle_search(&self, pattern: &str) -> Result<()> {
+        let Some(client) = self.ida_client.as_ref() else {
+            println!("Not connected. Run: connect <host:port>");
+            return Ok(());
+        };
+
+        let matches = fetch_search_results(&self.runtime, client.as_ref(), pattern)?;
+
+        if matches.is_empty() {
+            println!("No results");
+            return Ok(());
+        }
+
+        println!("Found {} result(s)", matches.len());
+        println!("{}", render_search_output(&matches));
+        Ok(())
+    }
+
     fn handle_sessions(&self) -> Result<()> {
         let sessions = self
             .store
@@ -309,6 +348,18 @@ fn parse_command(line: &str) -> ParsedLine {
             ParsedLine::Command(ReplCommand::Connect(target))
         }
         "ida-status" => ParsedLine::Command(ReplCommand::IdaStatus),
+        "decompile" => match tokens.next() {
+            Some(target) => ParsedLine::Command(ReplCommand::Decompile(target.to_string())),
+            None => ParsedLine::InvalidUsage("decompile <addr>"),
+        },
+        "search" => {
+            let pattern: Vec<&str> = tokens.collect();
+            if pattern.is_empty() {
+                ParsedLine::InvalidUsage("search <pattern>")
+            } else {
+                ParsedLine::Command(ReplCommand::Search(pattern.join(" ")))
+            }
+        }
         "sessions" => ParsedLine::Command(ReplCommand::Sessions),
         "session" => match tokens.next() {
             Some(id) => ParsedLine::Command(ReplCommand::Session(id.to_string())),
@@ -393,6 +444,8 @@ fn print_help() {
     println!("  analyze <path>       Load a Mach-O binary and create a session");
     println!("  connect [host:port]  Connect to IDA MCP (default: localhost:13337)");
     println!("  ida-status           Check IDA connection health");
+    println!("  decompile <addr>     Decompile function (0x..., decimal, or sub_...)");
+    println!("  search <pattern>     Search strings with regex pattern");
     println!("  sessions             List all sessions");
     println!("  session <id>         Switch active session");
     println!("  info                 Show active session info");
@@ -400,9 +453,86 @@ fn print_help() {
     println!("  quit | exit          Exit the REPL");
 }
 
+fn render_decompile_output(runtime: &Runtime, client: &IdaClient, target: &str) -> Result<String> {
+    let (address, function_name) = resolve_target_address(runtime, client, target)?;
+    let result = runtime.block_on(client.decompile(address))?;
+
+    let mut lines = vec![
+        fmt::h2(format!("{} @ {}", function_name, fmt::format_addr(result.address))),
+        fmt::separator(fmt::Separator::Standard, 88),
+    ];
+
+    for (index, line) in result.pseudocode.lines().enumerate() {
+        lines.push(format!("{:>4} | {}", index + 1, line));
+    }
+
+    if result.pseudocode.is_empty() {
+        lines.push("   1 |".to_string());
+    }
+
+    Ok(lines.join("\n"))
+}
+
+fn resolve_target_address(runtime: &Runtime, client: &IdaClient, target: &str) -> Result<(u64, String)> {
+    if let Some(address) = parse_decompile_target(target) {
+        let query = fmt::format_addr(address);
+        let name = runtime
+            .block_on(client.lookup_function(&query))
+            .ok()
+            .and_then(|function| function.map(|item| item.name))
+            .unwrap_or_else(|| format!("sub_{address:x}"));
+        return Ok((address, name));
+    }
+
+    let function = runtime
+        .block_on(client.lookup_function(target))
+        .with_context(|| format!("failed to resolve function '{target}'"))?
+        .with_context(|| format!("function '{target}' not found"))?;
+    Ok((function.address, function.name))
+}
+
+fn parse_decompile_target(raw: &str) -> Option<u64> {
+    let input = raw.trim();
+    if let Some(hex) = input.strip_prefix("0x").or_else(|| input.strip_prefix("0X")) {
+        return u64::from_str_radix(hex, 16).ok();
+    }
+
+    if let Ok(value) = input.parse::<u64>() {
+        return Some(value);
+    }
+
+    if let Some(suffix) = input.strip_prefix("sub_") {
+        return u64::from_str_radix(suffix, 16).ok();
+    }
+
+    None
+}
+
+fn fetch_search_results(runtime: &Runtime, client: &IdaClient, pattern: &str) -> Result<Vec<(u64, String)>> {
+    runtime
+        .block_on(client.find_strings(pattern))
+        .with_context(|| format!("failed to search strings for pattern '{pattern}'"))
+}
+
+fn render_search_output(matches: &[(u64, String)]) -> String {
+    let mut table = fmt::Table::new(vec![
+        fmt::Column::new("Address", 18, fmt::Align::Left),
+        fmt::Column::new("String", 76, fmt::Align::Left),
+    ]);
+
+    for (address, text) in matches {
+        table.add_row(vec![fmt::format_addr(*address), text.clone()]);
+    }
+
+    table.render()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_command, ParsedLine, ReplCommand};
+    use super::{
+        connect_with_transport, fetch_search_results, parse_command, parse_decompile_target,
+        render_decompile_output, render_search_output, ParsedLine, ReplCommand,
+    };
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
@@ -410,8 +540,6 @@ mod tests {
     use endeavour_ida::{IdaClient, IdaError, Transport};
     use serde_json::{json, Value};
     use tokio::runtime::Runtime;
-
-    use super::connect_with_transport;
 
     #[test]
     fn parse_analyze_command_with_path() {
@@ -427,6 +555,25 @@ mod tests {
             parse_command("connect"),
             ParsedLine::Command(ReplCommand::Connect(None))
         );
+    }
+
+    #[test]
+    fn parse_decompile_and_search_commands() {
+        assert_eq!(
+            parse_command("decompile 0x401000"),
+            ParsedLine::Command(ReplCommand::Decompile("0x401000".to_string()))
+        );
+        assert_eq!(
+            parse_command("search objc_msgSend"),
+            ParsedLine::Command(ReplCommand::Search("objc_msgSend".to_string()))
+        );
+    }
+
+    #[test]
+    fn parses_decompile_targets() {
+        assert_eq!(parse_decompile_target("0x401000"), Some(0x401000));
+        assert_eq!(parse_decompile_target("4198400"), Some(4_198_400));
+        assert_eq!(parse_decompile_target("sub_401000"), Some(0x401000));
     }
 
     struct MockTransport {
@@ -445,6 +592,13 @@ mod tests {
         fn first_call_method(&self) -> Option<String> {
             let guard = self.calls.lock().ok()?;
             guard.first().map(|(method, _)| method.clone())
+        }
+
+        fn call_methods(&self) -> Vec<String> {
+            if let Ok(guard) = self.calls.lock() {
+                return guard.iter().map(|(method, _)| method.clone()).collect();
+            }
+            Vec::new()
         }
     }
 
@@ -499,5 +653,79 @@ mod tests {
         let _typed: Arc<IdaClient> = client;
         assert_eq!(functions.len(), 1);
         assert_eq!(functions[0].name, "sub_401000");
+    }
+
+    #[test]
+    fn decompile_output_renders_header_and_line_numbers() {
+        let runtime = Runtime::new();
+        assert!(runtime.is_ok());
+        let runtime = match runtime {
+            Ok(value) => value,
+            Err(err) => panic!("failed to create runtime: {err}"),
+        };
+
+        let mock = Arc::new(MockTransport::new(vec![
+            Ok(json!([
+                {
+                    "fn": {
+                        "addr": "0x401000",
+                        "name": "sub_401000",
+                        "size": "0x20"
+                    }
+                }
+            ])),
+            Ok(json!({
+                "addr": "0x401000",
+                "code": "int x = 1;\nreturn x;"
+            })),
+        ]));
+
+        let client = IdaClient::with_transport("127.0.0.1", 13337, mock.clone());
+        let rendered = render_decompile_output(&runtime, &client, "sub_401000");
+        assert!(rendered.is_ok());
+        let rendered = match rendered {
+            Ok(value) => value,
+            Err(err) => panic!("unexpected error: {err}"),
+        };
+
+        assert!(rendered.contains("sub_401000 @ 0x00401000"));
+        assert!(rendered.contains("   1 | int x = 1;"));
+        assert!(rendered.contains("   2 | return x;"));
+
+        assert_eq!(mock.call_methods(), vec!["lookup_funcs", "decompile"]);
+    }
+
+    #[test]
+    fn search_command_fetches_and_renders_table() {
+        let runtime = Runtime::new();
+        assert!(runtime.is_ok());
+        let runtime = match runtime {
+            Ok(value) => value,
+            Err(err) => panic!("failed to create runtime: {err}"),
+        };
+
+        let mock = Arc::new(MockTransport::new(vec![Ok(json!({
+            "matches": [
+                {"addr": "0x401000", "string": "objc_msgSend"},
+                {"addr": "0x401010", "string": "NSLog"}
+            ]
+        }))]));
+        let client = IdaClient::with_transport("127.0.0.1", 13337, mock.clone());
+
+        let matches = fetch_search_results(&runtime, &client, "objc");
+        assert!(matches.is_ok());
+        let matches = match matches {
+            Ok(value) => value,
+            Err(err) => panic!("unexpected error: {err}"),
+        };
+        assert_eq!(matches.len(), 2);
+
+        let rendered = render_search_output(&matches);
+        assert!(rendered.contains("Address"));
+        assert!(rendered.contains("String"));
+        assert!(rendered.contains("objc_msgSend"));
+        assert!(rendered.contains("NSLog"));
+
+        assert_eq!(mock.first_call_method().as_deref(), Some("find_regex"));
     }
 }
