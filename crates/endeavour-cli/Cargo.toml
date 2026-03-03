@@ -18,6 +18,7 @@ owo-colors.workspace = true
 unicode-width.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+serde_json.workspace = true
 endeavour-core = { path = "../endeavour-core" }
 endeavour-ida = { path = "../endeavour-ida" }
 

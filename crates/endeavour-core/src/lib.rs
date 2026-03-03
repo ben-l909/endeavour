@@ -1,13 +1,15 @@
+pub mod config;
 /// Core error types.
 pub mod error;
+pub mod loader;
 /// Core domain models.
 pub mod models;
-pub mod loader;
 /// SQLite-backed session persistence.
 pub mod store;
 
 pub use error::{Error, Result};
 pub use models::*;
+pub use store::CacheStats;
 
 #[cfg(test)]
 mod tests {

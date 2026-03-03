@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use rusqlite::{params, types::Type, Connection, Row};
+use rusqlite::{params, types::Type, Connection, OptionalExtension, Row};
 use uuid::Uuid;
 
 use crate::{Error, Finding, FindingKind, Result, Session};
@@ -8,6 +8,12 @@ use crate::{Error, Finding, FindingKind, Result, Session};
 /// SQLite-backed session and artifact store.
 pub struct SessionStore {
     conn: Connection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheStats {
+    pub entry_count: u64,
+    pub methods: Vec<String>,
 }
 
 impl SessionStore {
@@ -135,6 +141,99 @@ impl SessionStore {
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(map_db_error)
     }
+
+    pub fn cache_ida_result(
+        &self,
+        session_id: Uuid,
+        method: &str,
+        address: u64,
+        response: &str,
+    ) -> Result<()> {
+        let id = Uuid::new_v4();
+        let cached_at = rfc3339_now(&self.conn)?;
+        let address = address_to_i64(address)?;
+
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO ida_cache (id, session_id, method, address, response_json, cached_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    id.to_string(),
+                    session_id.to_string(),
+                    method,
+                    address,
+                    response,
+                    cached_at
+                ],
+            )
+            .map_err(map_db_error)?;
+
+        Ok(())
+    }
+
+    pub fn get_cached_ida_result(
+        &self,
+        session_id: Uuid,
+        method: &str,
+        address: u64,
+    ) -> Result<Option<String>> {
+        let address = address_to_i64(address)?;
+        self.conn
+            .query_row(
+                "SELECT response_json
+                 FROM ida_cache
+                 WHERE session_id = ?1 AND method = ?2 AND address = ?3",
+                params![session_id.to_string(), method, address],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(map_db_error)
+    }
+
+    pub fn clear_ida_cache(&self, session_id: Uuid) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM ida_cache WHERE session_id = ?1",
+                params![session_id.to_string()],
+            )
+            .map_err(map_db_error)?;
+
+        Ok(())
+    }
+
+    pub fn cache_stats(&self, session_id: Uuid) -> Result<CacheStats> {
+        let entry_count: u64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM ida_cache WHERE session_id = ?1",
+                params![session_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(map_db_error)?;
+
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT DISTINCT method
+                 FROM ida_cache
+                 WHERE session_id = ?1
+                 ORDER BY method ASC",
+            )
+            .map_err(map_db_error)?;
+
+        let rows = statement
+            .query_map(params![session_id.to_string()], |row| row.get(0))
+            .map_err(map_db_error)?;
+
+        let methods = rows
+            .collect::<std::result::Result<Vec<String>, _>>()
+            .map_err(map_db_error)?;
+
+        Ok(CacheStats {
+            entry_count,
+            methods,
+        })
+    }
 }
 
 fn run_migrations(conn: &Connection) -> Result<()> {
@@ -159,9 +258,28 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_findings_session_id ON findings(session_id);
+
+        CREATE TABLE IF NOT EXISTS ida_cache (
+            id TEXT PRIMARY KEY NOT NULL,
+            session_id TEXT NOT NULL,
+            method TEXT NOT NULL,
+            address INTEGER NOT NULL,
+            response_json TEXT NOT NULL,
+            cached_at TEXT NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_ida_cache_lookup
+            ON ida_cache(session_id, method, address);
         ",
     )
     .map_err(map_db_error)
+}
+
+fn address_to_i64(address: u64) -> Result<i64> {
+    i64::try_from(address).map_err(|_| {
+        Error::DatabaseError(format!("address out of SQLite INTEGER range: {address}"))
+    })
 }
 
 fn rfc3339_now(conn: &Connection) -> Result<String> {
@@ -295,6 +413,87 @@ mod tests {
 
         let sessions = store.list_sessions()?;
         assert!(sessions.is_empty());
+
+        remove_if_exists(&path)
+    }
+
+    #[test]
+    fn cache_round_trip_and_stats() -> Result<()> {
+        let path = temp_store_path("cache-round-trip");
+        let store = SessionStore::open(&path)?;
+        let session = store.create_session("cache-session", uuid::Uuid::new_v4())?;
+
+        let payload = serde_json::json!({
+            "address": 0x401000u64,
+            "pseudocode": "int x = 1;"
+        })
+        .to_string();
+
+        store.cache_ida_result(session.id, "decompile", 0x401000, &payload)?;
+
+        let cached = store.get_cached_ida_result(session.id, "decompile", 0x401000)?;
+        assert_eq!(cached, Some(payload));
+
+        let stats = store.cache_stats(session.id)?;
+        assert_eq!(stats.entry_count, 1);
+        assert_eq!(stats.methods, vec!["decompile".to_string()]);
+
+        remove_if_exists(&path)
+    }
+
+    #[test]
+    fn cache_upsert_replaces_existing_value() -> Result<()> {
+        let path = temp_store_path("cache-upsert");
+        let store = SessionStore::open(&path)?;
+        let session = store.create_session("cache-upsert-session", uuid::Uuid::new_v4())?;
+
+        let first = serde_json::json!({"address": 0x401000u64, "pseudocode": "old"}).to_string();
+        let second = serde_json::json!({"address": 0x401000u64, "pseudocode": "new"}).to_string();
+
+        store.cache_ida_result(session.id, "decompile", 0x401000, &first)?;
+        store.cache_ida_result(session.id, "decompile", 0x401000, &second)?;
+
+        let cached = store.get_cached_ida_result(session.id, "decompile", 0x401000)?;
+        assert_eq!(cached, Some(second));
+
+        let stats = store.cache_stats(session.id)?;
+        assert_eq!(stats.entry_count, 1);
+
+        remove_if_exists(&path)
+    }
+
+    #[test]
+    fn clear_cache_removes_entries() -> Result<()> {
+        let path = temp_store_path("cache-clear");
+        let store = SessionStore::open(&path)?;
+        let session = store.create_session("cache-clear-session", uuid::Uuid::new_v4())?;
+
+        let payload = serde_json::json!({"address": 0x401000u64, "pseudocode": "x"}).to_string();
+        store.cache_ida_result(session.id, "decompile", 0x401000, &payload)?;
+        store.clear_ida_cache(session.id)?;
+
+        let cached = store.get_cached_ida_result(session.id, "decompile", 0x401000)?;
+        assert!(cached.is_none());
+
+        let stats = store.cache_stats(session.id)?;
+        assert_eq!(stats.entry_count, 0);
+        assert!(stats.methods.is_empty());
+
+        remove_if_exists(&path)
+    }
+
+    #[test]
+    fn deleting_session_cascades_cache_entries() -> Result<()> {
+        let path = temp_store_path("cache-cascade-delete");
+        let store = SessionStore::open(&path)?;
+        let session = store.create_session("cache-cascade-session", uuid::Uuid::new_v4())?;
+
+        let payload = serde_json::json!({"address": 0x401000u64, "pseudocode": "x"}).to_string();
+        store.cache_ida_result(session.id, "decompile", 0x401000, &payload)?;
+        store.delete_session(session.id)?;
+
+        let cached = store.get_cached_ida_result(session.id, "decompile", 0x401000)?;
+        assert!(cached.is_none());
 
         remove_if_exists(&path)
     }
