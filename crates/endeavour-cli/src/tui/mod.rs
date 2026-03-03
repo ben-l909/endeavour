@@ -16,6 +16,7 @@ use tokio::sync::watch;
 
 pub mod app;
 pub mod event;
+pub mod intent_router;
 
 pub use app::AppEvent;
 
