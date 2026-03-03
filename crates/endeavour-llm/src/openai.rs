@@ -189,11 +189,21 @@ impl StreamState {
 }
 
 fn finish_reason_to_stop_reason(reason: FinishReason) -> StopReason {
+    let raw = match reason {
+        FinishReason::ToolCalls => "tool_calls",
+        FinishReason::Length => "length",
+        FinishReason::Stop => "stop",
+        FinishReason::ContentFilter | FinishReason::FunctionCall => "stop_sequence",
+    };
+    map_openai_stop_reason(raw)
+}
+
+fn map_openai_stop_reason(reason: &str) -> StopReason {
     match reason {
-        FinishReason::ToolCalls => StopReason::ToolUse,
-        FinishReason::Length => StopReason::MaxTokens,
-        FinishReason::Stop => StopReason::EndTurn,
-        FinishReason::ContentFilter | FinishReason::FunctionCall => StopReason::StopSequence,
+        "stop" => StopReason::EndTurn,
+        "length" => StopReason::MaxTokens,
+        "tool_calls" => StopReason::ToolUse,
+        _ => StopReason::StopSequence,
     }
 }
 

@@ -572,9 +572,9 @@ fn extract_usage(value: &Value) -> Option<Usage> {
 
 fn map_stop_reason(reason: &str) -> StopReason {
     match reason {
-        "end_turn" => StopReason::EndTurn,
-        "tool_use" => StopReason::ToolUse,
-        "max_tokens" => StopReason::MaxTokens,
+        "end_turn" | "stop" => StopReason::EndTurn,
+        "tool_use" | "tool_calls" => StopReason::ToolUse,
+        "max_tokens" | "length" => StopReason::MaxTokens,
         "stop_sequence" => StopReason::StopSequence,
         _ => StopReason::StopSequence,
     }

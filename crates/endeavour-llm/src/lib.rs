@@ -3,21 +3,48 @@
 //! This crate provides a unified interface for interacting with different LLM providers
 //! (Anthropic, OpenAI) with support for both completion and streaming responses.
 
+mod agentic;
+#[path = "anthropic_shim.rs"]
 mod anthropic;
+mod chunking;
+mod context;
 mod error;
+mod ida_tool_executor;
 /// Mock provider for testing LLM integrations.
 pub mod mock;
 mod openai;
 mod provider;
+mod router;
 mod types;
 
 use endeavour_core::config::Config;
 
+pub use agentic::{
+    AgenticLoopConfig, AgenticLoopController, AgenticLoopCounters, AgenticLoopError,
+    AgenticLoopEvent, AgenticLoopResult, AgenticLoopState, AgenticTerminationReason, AgenticTurn,
+    ToolExecutor, Transcript, TranscriptContent, TranscriptEntry, TranscriptRecorder,
+    TranscriptRole,
+};
 pub use anthropic::AnthropicProvider;
+pub use chunking::{
+    Chunk, FunctionChunker, DEFAULT_CHUNK_MAX_TOKENS, DEFAULT_CHUNK_OVERLAP_TOKENS,
+};
+pub use context::{
+    estimate_text_tokens, BinaryMetadata, ContextBuilder, FunctionContext, FunctionXref,
+    DEFAULT_MAX_CONTEXT_TOKENS, DEFAULT_SYSTEM_PROMPT,
+};
 pub use error::{LlmError, Result};
+pub use ida_tool_executor::IdaToolExecutor;
 pub use openai::OpenAiProvider;
 pub use provider::{LlmProvider, ProviderStream};
-pub use types::{CompletionRequest, CompletionResponse, Message, Role, StreamChunk};
+pub use router::{
+    BackendProvider, FallbackEvent, LlmRouter, ProviderSelection, RoutePlan, RouterCompletion,
+    RouterNotice, TaskType,
+};
+pub use types::{
+    CompletionRequest, CompletionResponse, Message, Role, StopReason, StreamChunk, StreamChunkKind,
+    ToolCall, ToolDefinition, ToolResult, Usage,
+};
 
 /// Creates an LLM provider based on the provided configuration.
 ///
@@ -40,15 +67,39 @@ pub fn create_provider(config: &Config) -> Result<Box<dyn LlmProvider>> {
         .ok_or_else(|| LlmError::Configuration("No provider configured".to_string()))?;
 
     match provider {
-        "anthropic" => {
-            let api_key = config.anthropic_api_key.clone().ok_or(LlmError::AuthFailed)?;
+        "anthropic" | "claude" => {
+            let api_key = config
+                .anthropic_api_key
+                .clone()
+                .ok_or(LlmError::AuthFailed)?;
             Ok(Box::new(AnthropicProvider::new(api_key)))
         }
-        "openai" => {
+        "openai" | "gpt" => {
             let api_key = config.openai_api_key.clone().ok_or(LlmError::AuthFailed)?;
             Ok(Box::new(OpenAiProvider::new(api_key)))
         }
-        other => Err(LlmError::Configuration(format!("Unsupported provider: {other}"))),
+        "auto" => {
+            if config.anthropic_api_key.is_some() {
+                let api_key = config
+                    .anthropic_api_key
+                    .clone()
+                    .ok_or(LlmError::AuthFailed)?;
+                Ok(Box::new(AnthropicProvider::new(api_key)))
+            } else if config.openai_api_key.is_some() {
+                let api_key = config.openai_api_key.clone().ok_or(LlmError::AuthFailed)?;
+                Ok(Box::new(OpenAiProvider::new(api_key)))
+            } else {
+                Err(LlmError::Configuration(
+                    "No provider configured".to_string(),
+                ))
+            }
+        }
+        "ollama" => Err(LlmError::Configuration(
+            "Ollama support is not yet available; use auto, claude, or gpt".to_string(),
+        )),
+        other => Err(LlmError::Configuration(format!(
+            "Unsupported provider: {other}"
+        ))),
     }
 }
 
