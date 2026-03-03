@@ -10,9 +10,12 @@ pub struct SessionStore {
     conn: Connection,
 }
 
+/// Statistics about cached IDA analysis results.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheStats {
+    /// Number of cached entries.
     pub entry_count: u64,
+    /// List of distinct analysis methods cached.
     pub methods: Vec<String>,
 }
 
@@ -142,6 +145,7 @@ impl SessionStore {
             .map_err(map_db_error)
     }
 
+    /// Cache an IDA analysis result for a given method and address.
     pub fn cache_ida_result(
         &self,
         session_id: Uuid,
@@ -171,6 +175,7 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Retrieve a cached IDA analysis result, if it exists.
     pub fn get_cached_ida_result(
         &self,
         session_id: Uuid,
@@ -190,6 +195,7 @@ impl SessionStore {
             .map_err(map_db_error)
     }
 
+    /// Clear all cached IDA analysis results for a session.
     pub fn clear_ida_cache(&self, session_id: Uuid) -> Result<()> {
         self.conn
             .execute(
@@ -201,6 +207,7 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Get statistics about cached IDA analysis results.
     pub fn cache_stats(&self, session_id: Uuid) -> Result<CacheStats> {
         let entry_count: u64 = self
             .conn

@@ -5,43 +5,63 @@ use serde::{Deserialize, Serialize};
 const APP_DIRECTORY: &str = ".endeavour";
 const CONFIG_FILE_NAME: &str = "config.toml";
 
+/// Errors that can occur during configuration operations.
 #[derive(thiserror::Error, Debug)]
 pub enum ConfigError {
+    /// HOME environment variable is not set.
     #[error("HOME environment variable is not set")]
     HomeDirMissing,
+    /// I/O error while reading or writing configuration.
     #[error("config IO error: {0}")]
     Io(#[from] std::io::Error),
+    /// Error serializing configuration to TOML format.
     #[error("config serialization error: {0}")]
     Serialize(#[from] toml::ser::Error),
+    /// Error deserializing configuration from TOML format.
     #[error("config deserialization error: {0}")]
     Deserialize(#[from] toml::de::Error),
+    /// Unknown configuration key provided.
     #[error("unknown config key: {0}")]
     InvalidKey(String),
+    /// Invalid value for a configuration key.
     #[error("invalid value '{value}' for key '{key}'")]
-    InvalidValue { key: String, value: String },
+    InvalidValue {
+        /// The configuration key.
+        key: String,
+        /// The invalid value provided.
+        value: String,
+    },
 }
 
+/// Result type for configuration operations.
 pub type Result<T> = std::result::Result<T, ConfigError>;
 
+/// Configuration for Endeavour, storing API keys and provider preferences.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Config {
+    /// Anthropic API key for Claude models.
     pub anthropic_api_key: Option<String>,
+    /// OpenAI API key for GPT models.
     pub openai_api_key: Option<String>,
+    /// Default LLM provider ("anthropic" or "openai").
     pub default_provider: Option<String>,
 }
 
 impl Config {
+    /// Load configuration from the default location (~/.endeavour/config.toml).
     pub fn load() -> Result<Self> {
         let path = config_path()?;
         Self::load_from_path(&path)
     }
 
+    /// Save configuration to the default location (~/.endeavour/config.toml).
     pub fn save(&self) -> Result<()> {
         let path = config_path()?;
         self.save_to_path(&path)
     }
 
+    /// Set a configuration value by key. Validates provider values.
     pub fn set(&mut self, key: &str, value: &str) -> Result<()> {
         match normalize_key(key)? {
             "anthropic-api-key" => {
@@ -66,6 +86,7 @@ impl Config {
         Ok(())
     }
 
+    /// Get a configuration value by key.
     pub fn get(&self, key: &str) -> Result<Option<&str>> {
         let value = match normalize_key(key)? {
             "anthropic-api-key" => self.anthropic_api_key.as_deref(),
