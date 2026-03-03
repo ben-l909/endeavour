@@ -26,7 +26,7 @@ pub fn create_provider(config: &Config) -> Result<Box<dyn LlmProvider>> {
                 None
             }
         })
-        .ok_or_else(|| LlmError::OpenAi("No provider configured".to_string()))?;
+        .ok_or_else(|| LlmError::Configuration("No provider configured".to_string()))?;
 
     match provider {
         "anthropic" => {
@@ -37,6 +37,90 @@ pub fn create_provider(config: &Config) -> Result<Box<dyn LlmProvider>> {
             let api_key = config.openai_api_key.clone().ok_or(LlmError::AuthFailed)?;
             Ok(Box::new(OpenAiProvider::new(api_key)))
         }
-        other => Err(LlmError::OpenAi(format!("Unsupported provider: {other}"))),
+        other => Err(LlmError::Configuration(format!("Unsupported provider: {other}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use endeavour_core::config::Config;
+
+    use crate::{create_provider, LlmError};
+
+    #[test]
+    fn create_provider_returns_configuration_error_with_empty_config() {
+        let config = Config::default();
+
+        let result = create_provider(&config);
+
+        assert!(matches!(
+            result,
+            Err(LlmError::Configuration(message)) if message == "No provider configured"
+        ));
+    }
+
+    #[test]
+    fn create_provider_returns_configuration_error_for_unsupported_provider() {
+        let config = Config {
+            default_provider: Some("invalid_provider".to_string()),
+            ..Config::default()
+        };
+
+        let result = create_provider(&config);
+
+        assert!(matches!(
+            result,
+            Err(LlmError::Configuration(message)) if message == "Unsupported provider: invalid_provider"
+        ));
+    }
+
+    #[test]
+    fn create_provider_returns_auth_failed_for_anthropic_without_api_key() {
+        let config = Config {
+            default_provider: Some("anthropic".to_string()),
+            ..Config::default()
+        };
+
+        let result = create_provider(&config);
+
+        assert!(matches!(result, Err(LlmError::AuthFailed)));
+    }
+
+    #[test]
+    fn create_provider_returns_auth_failed_for_openai_without_api_key() {
+        let config = Config {
+            default_provider: Some("openai".to_string()),
+            ..Config::default()
+        };
+
+        let result = create_provider(&config);
+
+        assert!(matches!(result, Err(LlmError::AuthFailed)));
+    }
+
+    #[test]
+    fn create_provider_succeeds_for_anthropic_with_api_key() {
+        let config = Config {
+            default_provider: Some("anthropic".to_string()),
+            anthropic_api_key: Some("sk-ant-test-key".to_string()),
+            ..Config::default()
+        };
+
+        let result = create_provider(&config);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn create_provider_succeeds_for_openai_with_api_key() {
+        let config = Config {
+            default_provider: Some("openai".to_string()),
+            openai_api_key: Some("sk-openai-test-key".to_string()),
+            ..Config::default()
+        };
+
+        let result = create_provider(&config);
+
+        assert!(result.is_ok());
     }
 }
