@@ -143,9 +143,14 @@ fn handle_key_event(
 
     match key.code {
         KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => app.insert_newline(),
-        KeyCode::Enter => app.submit(),
+        KeyCode::Enter => {
+            if !app.toggle_focused_tool_call() {
+                app.submit();
+            }
+        }
         KeyCode::Backspace => app.backspace(),
         KeyCode::Esc => app.clear_input(),
+        KeyCode::Tab => app.focus_next_tool_call(),
         KeyCode::PageUp => app.page_up(),
         KeyCode::PageDown => app.page_down(),
         KeyCode::Up => app.scroll_up_line(),

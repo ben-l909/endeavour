@@ -10,6 +10,16 @@ pub enum AppEvent {
     AgentMessage(String),
     AgentMessageDelta(String),
     AgentMessageComplete,
+    ToolCallStart {
+        name: String,
+        args: String,
+    },
+    ToolCallResult {
+        name: String,
+        success: bool,
+        preview: String,
+        full_result: String,
+    },
     Tick,
     SystemMessage(String),
     Quit,
@@ -29,6 +39,29 @@ struct Message {
     timestamp: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolCallStatus {
+    Executing,
+    Success,
+    Failure,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolCallEntry {
+    name: String,
+    args: String,
+    status: ToolCallStatus,
+    preview: String,
+    full_result: String,
+    expanded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HistoryEntry {
+    Message(Message),
+    ToolCall(ToolCallEntry),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StreamingMessage {
     content: String,
@@ -45,9 +78,10 @@ pub struct HistoryView {
 #[derive(Debug, Default)]
 pub struct App {
     input: String,
-    messages: Vec<Message>,
+    history: Vec<HistoryEntry>,
     is_agent_streaming: bool,
     streaming_agent: Option<StreamingMessage>,
+    focused_tool_call: Option<usize>,
     spinner_index: usize,
     spinner_elapsed_ms: u64,
     stream_cursor_visible: bool,
@@ -117,6 +151,13 @@ impl App {
             AppEvent::AgentMessage(message) => self.push_message(MessageRole::Agent, message),
             AppEvent::AgentMessageDelta(chunk) => self.push_agent_stream_delta(chunk),
             AppEvent::AgentMessageComplete => self.complete_agent_stream(),
+            AppEvent::ToolCallStart { name, args } => self.start_tool_call(name, args),
+            AppEvent::ToolCallResult {
+                name,
+                success,
+                preview,
+                full_result,
+            } => self.complete_tool_call(name, success, preview, full_result),
             AppEvent::Tick => self.tick_streaming_animation(),
             AppEvent::SystemMessage(message) => self.push_message(MessageRole::System, message),
             AppEvent::Quit => {
@@ -130,6 +171,7 @@ impl App {
         if self.is_agent_streaming {
             return;
         }
+        self.focused_tool_call = None;
         self.input.push(ch);
         self.dirty = true;
     }
@@ -138,6 +180,7 @@ impl App {
         if self.is_agent_streaming {
             return;
         }
+        self.focused_tool_call = None;
         self.input.push('\n');
         self.dirty = true;
     }
@@ -146,6 +189,7 @@ impl App {
         if self.is_agent_streaming {
             return;
         }
+        self.focused_tool_call = None;
         if self.input.pop().is_some() {
             self.dirty = true;
         }
@@ -155,6 +199,7 @@ impl App {
         if self.is_agent_streaming {
             return;
         }
+        self.focused_tool_call = None;
         if !self.input.is_empty() {
             self.input.clear();
             self.dirty = true;
@@ -165,6 +210,7 @@ impl App {
         if self.is_agent_streaming {
             return;
         }
+        self.focused_tool_call = None;
         let submitted = self.input.trim().to_string();
         self.input.clear();
 
@@ -237,6 +283,43 @@ impl App {
 
     pub fn page_down(&mut self) {
         self.scroll_down(self.page_step());
+    }
+
+    pub fn focus_next_tool_call(&mut self) {
+        let tool_indices = self.tool_call_indices();
+        if tool_indices.is_empty() {
+            self.focused_tool_call = None;
+            return;
+        }
+
+        self.focused_tool_call = match self.focused_tool_call {
+            Some(current) => {
+                let next_pos = tool_indices
+                    .iter()
+                    .position(|idx| *idx > current)
+                    .unwrap_or(0);
+                Some(tool_indices[next_pos])
+            }
+            None => Some(*tool_indices.first().unwrap_or(&0)),
+        };
+        self.dirty = true;
+    }
+
+    pub fn toggle_focused_tool_call(&mut self) -> bool {
+        let Some(focused_index) = self.focused_tool_call else {
+            return false;
+        };
+
+        if let Some(HistoryEntry::ToolCall(tool_call)) = self.history.get_mut(focused_index) {
+            if tool_call.status == ToolCallStatus::Executing {
+                return false;
+            }
+            tool_call.expanded = !tool_call.expanded;
+            self.dirty = true;
+            return true;
+        }
+
+        false
     }
 
     pub fn scroll_offset(&self) -> usize {
@@ -325,8 +408,18 @@ impl App {
 
     fn render_history_lines(&self, width: u16, show_stream_cursor: bool) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
-        for message in &self.messages {
-            lines.extend(render_message(message, width));
+        for (index, entry) in self.history.iter().enumerate() {
+            match entry {
+                HistoryEntry::Message(message) => lines.extend(render_message(message, width)),
+                HistoryEntry::ToolCall(tool_call) => {
+                    lines.extend(render_tool_call(
+                        tool_call,
+                        width,
+                        self.spinner_index,
+                        self.focused_tool_call == Some(index),
+                    ));
+                }
+            }
         }
         if let Some(streaming) = &self.streaming_agent {
             lines.extend(render_streaming_message(
@@ -347,12 +440,64 @@ impl App {
     }
 
     fn push_message(&mut self, role: MessageRole, content: String) {
-        self.stop_agent_stream();
-        self.messages.push(Message {
+        self.finalize_streaming_into_history();
+        self.history.push(HistoryEntry::Message(Message {
             role,
             content,
             timestamp: current_hhmm(),
-        });
+        }));
+        self.on_new_message();
+    }
+
+    fn start_tool_call(&mut self, name: String, args: String) {
+        self.finalize_streaming_into_history();
+
+        self.history.push(HistoryEntry::ToolCall(ToolCallEntry {
+            name,
+            args,
+            status: ToolCallStatus::Executing,
+            preview: String::new(),
+            full_result: String::new(),
+            expanded: false,
+        }));
+        self.focused_tool_call = self.history.len().checked_sub(1);
+        self.on_new_message();
+    }
+
+    fn complete_tool_call(
+        &mut self,
+        name: String,
+        success: bool,
+        preview: String,
+        full_result: String,
+    ) {
+        let status = if success {
+            ToolCallStatus::Success
+        } else {
+            ToolCallStatus::Failure
+        };
+
+        for entry in self.history.iter_mut().rev() {
+            if let HistoryEntry::ToolCall(tool_call) = entry {
+                if tool_call.name == name && tool_call.status == ToolCallStatus::Executing {
+                    tool_call.status = status;
+                    tool_call.preview = first_line(&preview).to_string();
+                    tool_call.full_result = full_result;
+                    self.dirty = true;
+                    return;
+                }
+            }
+        }
+
+        self.history.push(HistoryEntry::ToolCall(ToolCallEntry {
+            name,
+            args: String::new(),
+            status,
+            preview: first_line(&preview).to_string(),
+            full_result,
+            expanded: false,
+        }));
+        self.focused_tool_call = self.history.len().checked_sub(1);
         self.on_new_message();
     }
 
@@ -381,15 +526,7 @@ impl App {
     }
 
     fn complete_agent_stream(&mut self) {
-        if let Some(streaming) = self.streaming_agent.take() {
-            if !streaming.content.trim().is_empty() {
-                self.messages.push(Message {
-                    role: MessageRole::Agent,
-                    content: streaming.content,
-                    timestamp: streaming.timestamp,
-                });
-            }
-        }
+        self.finalize_streaming_into_history();
         self.stop_agent_stream();
     }
 
@@ -403,7 +540,7 @@ impl App {
     }
 
     fn tick_streaming_animation(&mut self) {
-        if !self.is_agent_streaming {
+        if !self.is_agent_streaming && !self.has_executing_tool_call() {
             return;
         }
 
@@ -424,6 +561,18 @@ impl App {
         self.dirty = true;
     }
 
+    fn has_executing_tool_call(&self) -> bool {
+        self.history.iter().any(|entry| {
+            matches!(
+                entry,
+                HistoryEntry::ToolCall(ToolCallEntry {
+                    status: ToolCallStatus::Executing,
+                    ..
+                })
+            )
+        })
+    }
+
     fn current_stream_wrap_width(&self) -> u16 {
         if self.history_view_width > 1 {
             self.history_view_width as u16
@@ -439,6 +588,26 @@ impl App {
             self.unseen_count = self.unseen_count.saturating_add(1);
         }
         self.dirty = true;
+    }
+
+    fn finalize_streaming_into_history(&mut self) {
+        if let Some(streaming) = self.streaming_agent.take() {
+            if !streaming.content.trim().is_empty() {
+                self.history.push(HistoryEntry::Message(Message {
+                    role: MessageRole::Agent,
+                    content: streaming.content,
+                    timestamp: streaming.timestamp,
+                }));
+            }
+        }
+    }
+
+    fn tool_call_indices(&self) -> Vec<usize> {
+        self.history
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, entry)| matches!(entry, HistoryEntry::ToolCall(_)).then_some(idx))
+            .collect()
     }
 
     pub fn input_lines(&self, width: u16) -> Vec<Line<'static>> {
@@ -498,6 +667,79 @@ fn render_streaming_message(
         &message.timestamp,
         show_cursor,
     )
+}
+
+fn render_tool_call(
+    tool_call: &ToolCallEntry,
+    width: u16,
+    spinner_index: usize,
+    is_focused: bool,
+) -> Vec<Line<'static>> {
+    let focus_modifier = if is_focused {
+        Modifier::UNDERLINED
+    } else {
+        Modifier::empty()
+    };
+
+    let status_symbol = match tool_call.status {
+        ToolCallStatus::Executing => SPINNER_FRAMES[spinner_index],
+        ToolCallStatus::Success => "✓",
+        ToolCallStatus::Failure => "✗",
+    };
+    let status_color = match tool_call.status {
+        ToolCallStatus::Executing => amber(),
+        ToolCallStatus::Success => teal(),
+        ToolCallStatus::Failure => copper(),
+    };
+
+    let mut lines = Vec::new();
+    let mut first_line = vec![
+        Span::styled("  ● ".to_string(), Style::default().fg(dim())),
+        Span::styled(
+            format!("{status_symbol} "),
+            Style::default()
+                .fg(status_color)
+                .add_modifier(focus_modifier),
+        ),
+        Span::styled(
+            format!("{}({})", tool_call.name, tool_call.args),
+            Style::default().fg(chalk()).add_modifier(focus_modifier),
+        ),
+    ];
+
+    if tool_call.status != ToolCallStatus::Executing && !tool_call.preview.is_empty() {
+        let current_width: usize = first_line
+            .iter()
+            .map(|span| span.content.chars().count())
+            .sum();
+        let preview_prefix = " -> ";
+        let preview_room = (width as usize)
+            .saturating_sub(current_width)
+            .saturating_sub(preview_prefix.chars().count());
+        if preview_room > 0 {
+            first_line.push(Span::styled(
+                preview_prefix.to_string(),
+                Style::default().fg(dim()),
+            ));
+            first_line.push(Span::styled(
+                truncate_chars(&tool_call.preview, preview_room),
+                Style::default().fg(dim()),
+            ));
+        }
+    }
+    lines.push(Line::from(first_line));
+
+    if tool_call.expanded && !tool_call.full_result.trim().is_empty() {
+        let wrap_width = width.saturating_sub(4).max(1) as usize;
+        for segment in wrap_text(&tool_call.full_result, wrap_width) {
+            lines.push(Line::from(vec![
+                Span::styled("    ".to_string(), Style::default().fg(dim())),
+                Span::styled(segment, Style::default().fg(dim())),
+            ]));
+        }
+    }
+
+    lines
 }
 
 fn render_message_parts(
@@ -685,12 +927,42 @@ fn split_long_word(word: &str, width: usize) -> Vec<String> {
     chunks
 }
 
+fn first_line(input: &str) -> &str {
+    input.lines().next().unwrap_or("")
+}
+
+fn truncate_chars(input: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let count = input.chars().count();
+    if count <= width {
+        return input.to_string();
+    }
+
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+
+    let mut truncated = String::new();
+    for ch in input.chars().take(width.saturating_sub(3)) {
+        truncated.push(ch);
+    }
+    truncated.push_str("...");
+    truncated
+}
+
 fn steel() -> Color {
     Color::Rgb(91, 143, 212)
 }
 
 fn teal() -> Color {
     Color::Rgb(74, 158, 142)
+}
+
+fn copper() -> Color {
+    Color::Rgb(212, 138, 74)
 }
 
 fn amber() -> Color {
@@ -917,6 +1189,102 @@ mod tests {
         assert!(lines
             .iter()
             .all(|line| !line.to_string().contains("Agent:")));
+    }
+
+    #[test]
+    fn tool_call_renders_executing_and_completed_states() {
+        let mut app = App::new();
+        app.reduce(AppEvent::ToolCallStart {
+            name: "decompile".to_string(),
+            args: "0x401000".to_string(),
+        });
+
+        let executing = app.history_lines(80);
+        assert!(executing
+            .iter()
+            .any(|line| line.to_string().contains("● ⠋ decompile(0x401000)")));
+
+        app.reduce(AppEvent::ToolCallResult {
+            name: "decompile".to_string(),
+            success: true,
+            preview: "47 lines of pseudocode".to_string(),
+            full_result: "line one\nline two".to_string(),
+        });
+
+        let completed = app.history_lines(80);
+        assert!(completed.iter().any(|line| line
+            .to_string()
+            .contains("● ✓ decompile(0x401000) -> 47 lines of pseudocode")));
+    }
+
+    #[test]
+    fn tool_call_expand_toggle_reveals_full_result() {
+        let mut app = App::new();
+        app.reduce(AppEvent::ToolCallStart {
+            name: "rename".to_string(),
+            args: "sub_401000 -> aes_key_schedule".to_string(),
+        });
+        app.reduce(AppEvent::ToolCallResult {
+            name: "rename".to_string(),
+            success: true,
+            preview: "renamed".to_string(),
+            full_result: "first line\nsecond line".to_string(),
+        });
+
+        let collapsed = app.history_lines(80);
+        assert!(collapsed
+            .iter()
+            .all(|line| !line.to_string().contains("second line")));
+
+        app.focus_next_tool_call();
+        assert!(app.toggle_focused_tool_call());
+
+        let expanded = app.history_lines(80);
+        assert!(expanded
+            .iter()
+            .any(|line| line.to_string().contains("first line")));
+        assert!(expanded
+            .iter()
+            .any(|line| line.to_string().contains("second line")));
+    }
+
+    #[test]
+    fn tool_calls_interleave_between_streaming_agent_chunks() {
+        let mut app = App::new();
+        app.reduce(AppEvent::AgentMessageStart);
+        app.reduce(AppEvent::AgentMessageDelta("Let me check.".to_string()));
+        app.reduce(AppEvent::ToolCallStart {
+            name: "get_callees".to_string(),
+            args: "0x401000".to_string(),
+        });
+        app.reduce(AppEvent::ToolCallResult {
+            name: "get_callees".to_string(),
+            success: true,
+            preview: "3 callees found".to_string(),
+            full_result: "a\nb\nc".to_string(),
+        });
+        app.reduce(AppEvent::AgentMessageDelta(
+            " It calls three functions.".to_string(),
+        ));
+        app.reduce(AppEvent::AgentMessageComplete);
+
+        let rendered = app.history_lines(100);
+        let joined = rendered
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let first_agent = joined.find("Agent: Let me check.").expect("first chunk");
+        let tool_line = joined
+            .find("● ✓ get_callees(0x401000) -> 3 callees found")
+            .expect("tool line");
+        let second_agent = joined
+            .find("Agent: It calls three functions.")
+            .expect("second chunk");
+
+        assert!(first_agent < tool_line);
+        assert!(tool_line < second_agent);
     }
 
     #[test]
