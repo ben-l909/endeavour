@@ -119,7 +119,7 @@ impl Repl {
                 .context("failed to read REPL input")?
             {
                 Signal::Success(buffer) => {
-                    if self.dispatch_line(parse_command(buffer.trim()))? {
+                    if self.dispatch_line(parse_command(buffer.trim())) {
                         break;
                     }
                 }
@@ -142,85 +142,125 @@ impl Repl {
             if bytes == 0 {
                 break;
             }
-            if self.dispatch_line(parse_command(line.trim()))? {
+            if self.dispatch_line(parse_command(line.trim())) {
                 break;
             }
         }
         Ok(())
     }
 
-    fn dispatch_line(&mut self, parsed: ParsedLine) -> Result<bool> {
+    fn dispatch_line(&mut self, parsed: ParsedLine) -> bool {
         match parsed {
             ParsedLine::Empty => {}
             ParsedLine::Command(ReplCommand::Help) => print_help(),
             ParsedLine::Command(ReplCommand::Analyze(path)) => {
-                commands::handle_analyze(self, &path)?;
+                if let Err(e) = commands::handle_analyze(self, &path) {
+                    eprintln!("✗ error: {e}");
+                }
             }
             ParsedLine::Command(ReplCommand::Connect(target)) => {
-                commands::handle_connect(self, target.as_deref())?;
+                if let Err(e) = commands::handle_connect(self, target.as_deref()) {
+                    eprintln!("✗ error: {e}");
+                }
             }
             ParsedLine::Command(ReplCommand::IdaStatus) => {
-                commands::handle_ida_status(self)?;
+                if let Err(e) = commands::handle_ida_status(self) {
+                    eprintln!("✗ error: {e}");
+                }
             }
             ParsedLine::Command(ReplCommand::Decompile(target)) => {
                 commands::handle_decompile(self, &target);
             }
             ParsedLine::Command(ReplCommand::Explain(command)) => {
-                commands::handle_explain(self, &command)?;
+                if let Err(e) = commands::handle_explain(self, &command) {
+                    eprintln!("✗ error: {e}");
+                }
             }
             ParsedLine::Command(ReplCommand::Rename(command)) => {
-                commands::handle_rename(self, &command)?;
+                if let Err(e) = commands::handle_rename(self, &command) {
+                    eprintln!("✗ error: {e}");
+                }
             }
             ParsedLine::Command(ReplCommand::Review) => {
-                commands::handle_review(self)?;
+                if let Err(e) = commands::handle_review(self) {
+                    eprintln!("✗ error: {e}");
+                }
             }
             ParsedLine::Command(ReplCommand::Comment(target, comment)) => {
-                commands::handle_comment(self, &target, &comment)?;
+                if let Err(e) = commands::handle_comment(self, &target, &comment) {
+                    eprintln!("✗ error: {e}");
+                }
             }
             ParsedLine::Command(ReplCommand::Callgraph(target, max_depth)) => {
-                commands::handle_callgraph(self, &target, max_depth)?;
+                if let Err(e) = commands::handle_callgraph(self, &target, max_depth) {
+                    eprintln!("✗ error: {e}");
+                }
             }
             ParsedLine::Command(ReplCommand::Search(pattern)) => {
-                commands::handle_search(self, &pattern)?;
+                if let Err(e) = commands::handle_search(self, &pattern) {
+                    eprintln!("✗ error: {e}");
+                }
             }
             ParsedLine::Command(ReplCommand::Sessions) => {
-                commands::handle_sessions(self)?;
+                if let Err(e) = commands::handle_sessions(self) {
+                    eprintln!("✗ error: {e}");
+                }
             }
             ParsedLine::Command(ReplCommand::Session(id)) => {
-                commands::handle_session_switch(self, &id)?;
+                if let Err(e) = commands::handle_session_switch(self, &id) {
+                    eprintln!("✗ error: {e}");
+                }
             }
             ParsedLine::Command(ReplCommand::SessionNew) => {
-                commands::handle_session_new(self)?;
+                if let Err(e) = commands::handle_session_new(self) {
+                    eprintln!("✗ error: {e}");
+                }
             }
             ParsedLine::Command(ReplCommand::SessionCommandError(subcommand)) => {
                 println!("✗ error: unknown session subcommand '{subcommand}'");
                 println!("    ╰─ valid subcommands: new, list, load <id>, info");
             }
             ParsedLine::Command(ReplCommand::Info) => {
-                commands::handle_info(self)?;
+                if let Err(e) = commands::handle_info(self) {
+                    eprintln!("✗ error: {e}");
+                }
             }
             ParsedLine::Command(ReplCommand::Findings) => {
-                commands::handle_findings(self)?;
+                if let Err(e) = commands::handle_findings(self) {
+                    eprintln!("✗ error: {e}");
+                }
             }
             ParsedLine::Command(ReplCommand::CacheStats) => {
-                commands::handle_cache_stats(self)?;
+                if let Err(e) = commands::handle_cache_stats(self) {
+                    eprintln!("✗ error: {e}");
+                }
             }
             ParsedLine::Command(ReplCommand::CacheClear) => {
-                commands::handle_cache_clear(self)?;
+                if let Err(e) = commands::handle_cache_clear(self) {
+                    eprintln!("✗ error: {e}");
+                }
             }
             ParsedLine::Command(ReplCommand::ConfigSet { key, value }) => {
-                commands::handle_config_set(self, &key, &value)?;
+                if let Err(e) = commands::handle_config_set(self, &key, &value) {
+                    eprintln!("✗ error: {e}");
+                }
             }
             ParsedLine::Command(ReplCommand::ConfigGet(key)) => {
-                commands::handle_config_get(self, &key)?;
+                if let Err(e) = commands::handle_config_get(self, &key) {
+                    eprintln!("✗ error: {e}");
+                }
             }
             ParsedLine::Command(ReplCommand::ConfigList) => {
-                commands::handle_config_list(self)?;
+                if let Err(e) = commands::handle_config_list(self) {
+                    eprintln!("✗ error: {e}");
+                }
             }
             ParsedLine::Command(ReplCommand::ShowTranscript(command)) => {
-                commands::handle_show_transcript(self, &command)?;
+                if let Err(e) = commands::handle_show_transcript(self, &command) {
+                    eprintln!("✗ error: {e}");
+                }
             }
-            ParsedLine::Command(ReplCommand::Quit) => return Ok(true),
+            ParsedLine::Command(ReplCommand::Quit) => return true,
             ParsedLine::Unknown(cmd) => {
                 println!("Unknown command: {cmd}. Type 'help' for available commands.");
             }
@@ -229,7 +269,7 @@ impl Repl {
             }
         }
 
-        Ok(false)
+        false
     }
 
     fn prompt(&self) -> DefaultPrompt {

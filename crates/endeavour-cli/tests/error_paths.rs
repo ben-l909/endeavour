@@ -67,12 +67,12 @@ fn error_paths_connect_method_not_found_mock_transport_returns_error() {
 }
 
 #[test]
-fn error_paths_connect_handler_crash_path_exits_non_zero() {
+fn error_paths_connect_handler_graceful_error_recovery() {
     let output = run_repl_script("connect localhost\nhelp\nquit\n");
     let stdout = stdout_text(&output);
 
-    assert!(!output.status.success());
-    assert!(stdout.contains("Welcome to endeavour REPL"));
+    assert!(output.status.success());
+    assert!(stdout.contains("Available commands:"));
 }
 
 #[test]
@@ -196,15 +196,19 @@ fn error_paths_cache_clear_no_active_session() {
 }
 
 #[test]
-fn error_paths_config_set_unknown_key_crash_path_exits_non_zero() {
+fn error_paths_config_set_unknown_key_graceful_error_recovery() {
     let output = run_repl_script("config set theme dark\nhelp\nquit\n");
-    assert!(!output.status.success());
+    let stdout = stdout_text(&output);
+    assert!(output.status.success());
+    assert!(stdout.contains("Available commands:"));
 }
 
 #[test]
-fn error_paths_config_get_unknown_key_crash_path_exits_non_zero() {
+fn error_paths_config_get_unknown_key_graceful_error_recovery() {
     let output = run_repl_script("config get theme\nhelp\nquit\n");
-    assert!(!output.status.success());
+    let stdout = stdout_text(&output);
+    assert!(output.status.success());
+    assert!(stdout.contains("Available commands:"));
 }
 
 #[test]
@@ -217,9 +221,11 @@ fn error_paths_config_list_loads_defaults_without_crashing() {
 }
 
 #[test]
-fn error_paths_show_transcript_invalid_uuid_crash_path_exits_non_zero() {
+fn error_paths_show_transcript_invalid_uuid_graceful_error_recovery() {
     let output = run_repl_script("show-transcript not-a-uuid\nhelp\nquit\n");
-    assert!(!output.status.success());
+    let stdout = stdout_text(&output);
+    assert!(output.status.success());
+    assert!(stdout.contains("Available commands:"));
 }
 
 #[test]
