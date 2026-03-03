@@ -2,10 +2,15 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
+use super::status_bar::{IdaConnectionState, StatusBar, StatusBarState};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
     AgentMessage(String),
     SystemMessage(String),
+    IdaConnectionChanged(bool),
+    SessionChanged(Option<String>),
+    TurnCompleted { tokens_used: u64 },
     Quit,
 }
 
@@ -26,6 +31,7 @@ struct Message {
 pub struct App {
     input: String,
     messages: Vec<Message>,
+    status: StatusBarState,
     should_quit: bool,
     dirty: bool,
 }
@@ -81,6 +87,23 @@ impl App {
         match event {
             AppEvent::AgentMessage(message) => self.push_message(MessageRole::Agent, message),
             AppEvent::SystemMessage(message) => self.push_message(MessageRole::System, message),
+            AppEvent::IdaConnectionChanged(is_connected) => {
+                self.status.ida = if is_connected {
+                    IdaConnectionState::Connected
+                } else {
+                    IdaConnectionState::Disconnected
+                };
+                self.dirty = true;
+            }
+            AppEvent::SessionChanged(session_id) => {
+                self.status.session_id = session_id;
+                self.status.tokens = 0;
+                self.dirty = true;
+            }
+            AppEvent::TurnCompleted { tokens_used } => {
+                self.status.tokens = self.status.tokens.saturating_add(tokens_used);
+                self.dirty = true;
+            }
             AppEvent::Quit => {
                 self.should_quit = true;
                 self.dirty = true;
@@ -156,9 +179,8 @@ impl App {
             .collect()
     }
 
-    pub fn status_line(&self) -> Line<'static> {
-        let text = "[IDA: disconnected] [Session: none] [Tokens: 0]";
-        Line::from(Span::styled(text.to_string(), Style::default().fg(dim())))
+    pub fn status_line(&self, width: u16) -> Line<'static> {
+        StatusBar.render(&self.status, width)
     }
 
     fn input_height(&self, width: u16) -> u16 {
@@ -295,43 +317,23 @@ fn available_width(total_width: usize, prefix_width: usize) -> usize {
 }
 
 fn steel() -> Color {
-    Color::Rgb {
-        r: 91,
-        g: 143,
-        b: 212,
-    }
+    Color::Rgb(91, 143, 212)
 }
 
 fn teal() -> Color {
-    Color::Rgb {
-        r: 74,
-        g: 158,
-        b: 142,
-    }
+    Color::Rgb(74, 158, 142)
 }
 
 fn amber() -> Color {
-    Color::Rgb {
-        r: 212,
-        g: 160,
-        b: 74,
-    }
+    Color::Rgb(212, 160, 74)
 }
 
 fn chalk() -> Color {
-    Color::Rgb {
-        r: 200,
-        g: 200,
-        b: 200,
-    }
+    Color::Rgb(200, 200, 200)
 }
 
 fn dim() -> Color {
-    Color::Rgb {
-        r: 90,
-        g: 90,
-        b: 90,
-    }
+    Color::Rgb(90, 90, 90)
 }
 
 #[cfg(test)]
@@ -373,9 +375,11 @@ mod tests {
         app.submit();
 
         let lines = app.history_lines(80);
-        assert!(lines
-            .iter()
-            .any(|line| line.to_string().contains("You: hello")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.to_string().contains("You: hello"))
+        );
         assert_eq!(app.input(), "");
     }
 
@@ -395,11 +399,43 @@ mod tests {
         app.reduce(AppEvent::AgentMessage("thinking".to_string()));
         app.reduce(AppEvent::SystemMessage("tool done".to_string()));
         let rendered = app.history_lines(80);
-        assert!(rendered
-            .iter()
-            .any(|line| line.to_string().contains("Agent: thinking")));
-        assert!(rendered
-            .iter()
-            .any(|line| line.to_string().contains("  ● tool done")));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.to_string().contains("Agent: thinking"))
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.to_string().contains("  ● tool done"))
+        );
+    }
+
+    #[test]
+    fn status_line_updates_for_ida_session_and_tokens() {
+        let mut app = App::new();
+        app.reduce(AppEvent::IdaConnectionChanged(true));
+        app.reduce(AppEvent::SessionChanged(Some(
+            "3f2a1b4c-8e9d-4a2b-b1c3-d4e5f6a7b8c9".to_string(),
+        )));
+        app.reduce(AppEvent::TurnCompleted { tokens_used: 4_821 });
+
+        let status = app.status_line(120).to_string();
+        assert_eq!(
+            status,
+            "[IDA: connected] [Session: 3f2a1b4c] [Tokens: 4,821] [Auth: none]"
+        );
+    }
+
+    #[test]
+    fn status_line_resets_token_count_on_session_change() {
+        let mut app = App::new();
+        app.reduce(AppEvent::TurnCompleted { tokens_used: 125 });
+        app.reduce(AppEvent::SessionChanged(Some(
+            "550e8400-e29b-41d4-a716-446655440000".to_string(),
+        )));
+
+        let status = app.status_line(120).to_string();
+        assert!(status.contains("[Tokens: 0]"));
     }
 }

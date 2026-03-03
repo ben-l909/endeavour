@@ -1,13 +1,14 @@
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::error::{IdaError, Result};
 use crate::types::{
-    BasicBlock, CommentRequest, DecompileResult, DisasmInstruction, FunctionInfo, RenameRequest, XRef,
+    BasicBlock, CommentRequest, DecompileResult, DisasmInstruction, FunctionInfo, RenameRequest,
+    XRef,
 };
 
 /// Abstract transport for IDA MCP requests.
@@ -52,15 +53,21 @@ impl Transport for HttpTransport {
         });
         let url = format!("{}/mcp", self.base_url.trim_end_matches('/'));
 
-        let response = self.client.post(url).json(&body).send().await.map_err(|err| {
-            if err.is_timeout() {
-                IdaError::Timeout
-            } else if err.is_connect() {
-                IdaError::ConnectionError(err.to_string())
-            } else {
-                IdaError::HttpError(err)
-            }
-        })?;
+        let response = self
+            .client
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| {
+                if err.is_timeout() {
+                    IdaError::Timeout
+                } else if err.is_connect() {
+                    IdaError::ConnectionError(err.to_string())
+                } else {
+                    IdaError::HttpError(err)
+                }
+            })?;
 
         let payload: Value = response.json().await.map_err(|err| {
             if err.is_decode() {
@@ -74,10 +81,9 @@ impl Transport for HttpTransport {
             return Err(IdaError::IdaResponseError(error.to_string()));
         }
 
-        let result = payload
-            .get("result")
-            .cloned()
-            .ok_or_else(|| IdaError::DeserializationError("Missing JSON-RPC result field".to_string()))?;
+        let result = payload.get("result").cloned().ok_or_else(|| {
+            IdaError::DeserializationError("Missing JSON-RPC result field".to_string())
+        })?;
 
         normalize_result(result)
     }
@@ -134,7 +140,11 @@ impl IdaClient {
             .get("pseudocode")
             .or_else(|| payload.get("code"))
             .and_then(Value::as_str)
-            .ok_or_else(|| IdaError::DeserializationError("Missing pseudocode/code in decompile response".to_string()))?;
+            .ok_or_else(|| {
+                IdaError::DeserializationError(
+                    "Missing pseudocode/code in decompile response".to_string(),
+                )
+            })?;
 
         let address = payload
             .get("address")
@@ -170,7 +180,11 @@ impl IdaClient {
             .and_then(|asm| asm.get("lines"))
             .or_else(|| payload.get("lines"))
             .and_then(Value::as_str)
-            .ok_or_else(|| IdaError::DeserializationError("Missing asm.lines/lines in disasm response".to_string()))?;
+            .ok_or_else(|| {
+                IdaError::DeserializationError(
+                    "Missing asm.lines/lines in disasm response".to_string(),
+                )
+            })?;
 
         Ok(parse_disassembly_lines(lines))
     }
@@ -206,7 +220,9 @@ impl IdaClient {
                 .get("items")
                 .or_else(|| page.get("functions"))
                 .and_then(Value::as_array)
-                .ok_or_else(|| IdaError::DeserializationError("Page missing items/functions".to_string()))?;
+                .ok_or_else(|| {
+                    IdaError::DeserializationError("Page missing items/functions".to_string())
+                })?;
             for item in items {
                 functions.push(parse_function(item)?);
             }
@@ -221,12 +237,12 @@ impl IdaClient {
             .transport
             .call("lookup_funcs", json!({ "queries": [query] }))
             .await?;
-        let entries = payload
-            .as_array()
-            .ok_or_else(|| IdaError::DeserializationError("lookup_funcs response must be an array".to_string()))?;
-        let first = entries
-            .first()
-            .ok_or_else(|| IdaError::DeserializationError("lookup_funcs response is empty".to_string()))?;
+        let entries = payload.as_array().ok_or_else(|| {
+            IdaError::DeserializationError("lookup_funcs response must be an array".to_string())
+        })?;
+        let first = entries.first().ok_or_else(|| {
+            IdaError::DeserializationError("lookup_funcs response is empty".to_string())
+        })?;
 
         check_error_field(first)?;
         let fn_value = first.get("fn").unwrap_or(&Value::Null);
@@ -247,13 +263,16 @@ impl IdaClient {
         let top = payload
             .as_array()
             .and_then(|arr| arr.first())
-            .ok_or_else(|| IdaError::DeserializationError("xrefs_to response must be a non-empty array".to_string()))?;
+            .ok_or_else(|| {
+                IdaError::DeserializationError(
+                    "xrefs_to response must be a non-empty array".to_string(),
+                )
+            })?;
         check_error_field(top)?;
 
-        let xrefs = top
-            .get("xrefs")
-            .and_then(Value::as_array)
-            .ok_or_else(|| IdaError::DeserializationError("xrefs_to result missing xrefs".to_string()))?;
+        let xrefs = top.get("xrefs").and_then(Value::as_array).ok_or_else(|| {
+            IdaError::DeserializationError("xrefs_to result missing xrefs".to_string())
+        })?;
 
         let mut parsed = Vec::with_capacity(xrefs.len());
         for item in xrefs {
@@ -261,7 +280,9 @@ impl IdaClient {
                 .get("from_addr")
                 .or_else(|| item.get("addr"))
                 .and_then(parse_u64)
-                .ok_or_else(|| IdaError::DeserializationError("xref missing source address".to_string()))?;
+                .ok_or_else(|| {
+                    IdaError::DeserializationError("xref missing source address".to_string())
+                })?;
             let xref_type = item
                 .get("xref_type")
                 .or_else(|| item.get("type"))
@@ -287,12 +308,18 @@ impl IdaClient {
         let top = payload
             .as_array()
             .and_then(|arr| arr.first())
-            .ok_or_else(|| IdaError::DeserializationError("callees response must be a non-empty array".to_string()))?;
+            .ok_or_else(|| {
+                IdaError::DeserializationError(
+                    "callees response must be a non-empty array".to_string(),
+                )
+            })?;
         check_error_field(top)?;
         let callees = top
             .get("callees")
             .and_then(Value::as_array)
-            .ok_or_else(|| IdaError::DeserializationError("callees entry missing callees list".to_string()))?;
+            .ok_or_else(|| {
+                IdaError::DeserializationError("callees entry missing callees list".to_string())
+            })?;
         let mut result = Vec::with_capacity(callees.len());
         for callee in callees {
             result.push(parse_function(callee)?);
@@ -312,16 +339,22 @@ impl IdaClient {
         let edges = payload
             .get("edges")
             .and_then(Value::as_array)
-            .ok_or_else(|| IdaError::DeserializationError("callgraph response missing edges".to_string()))?;
+            .ok_or_else(|| {
+                IdaError::DeserializationError("callgraph response missing edges".to_string())
+            })?;
         let mut parsed = Vec::with_capacity(edges.len());
         for edge in edges {
             if let Some(pair) = edge.as_array() {
                 if pair.len() >= 2 {
                     let src = parse_u64(&pair[0]).ok_or_else(|| {
-                        IdaError::DeserializationError("callgraph edge source is invalid".to_string())
+                        IdaError::DeserializationError(
+                            "callgraph edge source is invalid".to_string(),
+                        )
                     })?;
                     let dst = parse_u64(&pair[1]).ok_or_else(|| {
-                        IdaError::DeserializationError("callgraph edge destination is invalid".to_string())
+                        IdaError::DeserializationError(
+                            "callgraph edge destination is invalid".to_string(),
+                        )
                     })?;
                     parsed.push((src, dst));
                     continue;
@@ -331,12 +364,18 @@ impl IdaClient {
                 .get("src")
                 .or_else(|| edge.get("from"))
                 .and_then(parse_u64)
-                .ok_or_else(|| IdaError::DeserializationError("callgraph edge source is missing".to_string()))?;
+                .ok_or_else(|| {
+                    IdaError::DeserializationError("callgraph edge source is missing".to_string())
+                })?;
             let dst = edge
                 .get("dst")
                 .or_else(|| edge.get("to"))
                 .and_then(parse_u64)
-                .ok_or_else(|| IdaError::DeserializationError("callgraph edge destination is missing".to_string()))?;
+                .ok_or_else(|| {
+                    IdaError::DeserializationError(
+                        "callgraph edge destination is missing".to_string(),
+                    )
+                })?;
             parsed.push((src, dst));
         }
         Ok(parsed)
@@ -353,18 +392,18 @@ impl IdaClient {
         let matches = payload
             .get("matches")
             .and_then(Value::as_array)
-            .ok_or_else(|| IdaError::DeserializationError("find_regex response missing matches".to_string()))?;
+            .ok_or_else(|| {
+                IdaError::DeserializationError("find_regex response missing matches".to_string())
+            })?;
 
         let mut results = Vec::with_capacity(matches.len());
         for m in matches {
-            let address = m
-                .get("addr")
-                .and_then(parse_u64)
-                .ok_or_else(|| IdaError::DeserializationError("match addr is missing".to_string()))?;
-            let text = m
-                .get("string")
-                .and_then(Value::as_str)
-                .ok_or_else(|| IdaError::DeserializationError("match string is missing".to_string()))?;
+            let address = m.get("addr").and_then(parse_u64).ok_or_else(|| {
+                IdaError::DeserializationError("match addr is missing".to_string())
+            })?;
+            let text = m.get("string").and_then(Value::as_str).ok_or_else(|| {
+                IdaError::DeserializationError("match string is missing".to_string())
+            })?;
             results.push((address, text.to_string()));
         }
 
@@ -386,7 +425,9 @@ impl IdaClient {
             .get("func")
             .and_then(Value::as_array)
             .and_then(|arr| arr.first())
-            .ok_or_else(|| IdaError::DeserializationError("rename response missing func result".to_string()))?;
+            .ok_or_else(|| {
+                IdaError::DeserializationError("rename response missing func result".to_string())
+            })?;
 
         if let Some(error) = result.get("error") {
             if !error.is_null() {
@@ -397,6 +438,84 @@ impl IdaClient {
         let ok = result.get("ok").and_then(Value::as_bool).unwrap_or(false);
         if !ok {
             return Err(IdaError::IdaResponseError("Rename failed".to_string()));
+        }
+
+        Ok(())
+    }
+
+    pub async fn rename_variable(&self, old_name: &str, new_name: &str) -> Result<()> {
+        let payload = self
+            .transport
+            .call(
+                "rename",
+                json!({
+                    "batch": {
+                        "data": [{ "old": old_name, "new": new_name }]
+                    }
+                }),
+            )
+            .await?;
+
+        let result = payload
+            .get("data")
+            .and_then(Value::as_array)
+            .and_then(|arr| arr.first())
+            .ok_or_else(|| {
+                IdaError::DeserializationError("rename response missing data result".to_string())
+            })?;
+
+        if let Some(error) = result.get("error") {
+            if !error.is_null() {
+                return Err(IdaError::IdaResponseError(error.to_string()));
+            }
+        }
+
+        let ok = result.get("ok").and_then(Value::as_bool).unwrap_or(false);
+        if !ok {
+            return Err(IdaError::IdaResponseError(
+                "variable rename failed".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub async fn rename_local(&self, func_addr: u64, old_name: &str, new_name: &str) -> Result<()> {
+        let payload = self
+            .transport
+            .call(
+                "rename",
+                json!({
+                    "batch": {
+                        "local": [{
+                            "func_addr": to_hex(func_addr),
+                            "old": old_name,
+                            "new": new_name
+                        }]
+                    }
+                }),
+            )
+            .await?;
+
+        let result = payload
+            .get("local")
+            .and_then(Value::as_array)
+            .and_then(|arr| arr.first())
+            .ok_or_else(|| {
+                IdaError::DeserializationError("rename response missing local result".to_string())
+            })?;
+
+        if let Some(error) = result.get("error") {
+            if !error.is_null() {
+                return Err(IdaError::IdaResponseError(error.to_string()));
+            }
+        }
+
+        let ok = result.get("ok").and_then(Value::as_bool).unwrap_or(false);
+        if !ok {
+            return Err(IdaError::IdaResponseError(
+                "local rename failed".to_string(),
+            ));
         }
 
         Ok(())
@@ -416,7 +535,11 @@ impl IdaClient {
         let result = payload
             .as_array()
             .and_then(|arr| arr.first())
-            .ok_or_else(|| IdaError::DeserializationError("set_comments response must be non-empty array".to_string()))?;
+            .ok_or_else(|| {
+                IdaError::DeserializationError(
+                    "set_comments response must be non-empty array".to_string(),
+                )
+            })?;
 
         if let Some(error) = result.get("error") {
             if !error.is_null() {
@@ -432,7 +555,9 @@ impl IdaClient {
 
     /// Executes Python in IDA and returns raw JSON output.
     pub async fn py_eval(&self, code: &str) -> Result<Value> {
-        self.transport.call("py_eval", json!({ "code": code })).await
+        self.transport
+            .call("py_eval", json!({ "code": code }))
+            .await
     }
 
     /// Reads bytes at address.
@@ -450,15 +575,28 @@ impl IdaClient {
         let entry = payload
             .as_array()
             .and_then(|arr| arr.first())
-            .or_else(|| payload.get("regions").and_then(Value::as_array).and_then(|arr| arr.first()))
-            .ok_or_else(|| IdaError::DeserializationError("get_bytes response missing region entry".to_string()))?;
+            .or_else(|| {
+                payload
+                    .get("regions")
+                    .and_then(Value::as_array)
+                    .and_then(|arr| arr.first())
+            })
+            .ok_or_else(|| {
+                IdaError::DeserializationError(
+                    "get_bytes response missing region entry".to_string(),
+                )
+            })?;
         check_error_field(entry)?;
 
         let raw = entry
             .get("bytes")
             .or_else(|| entry.get("data"))
             .and_then(Value::as_str)
-            .ok_or_else(|| IdaError::DeserializationError("get_bytes result missing bytes/data field".to_string()))?;
+            .ok_or_else(|| {
+                IdaError::DeserializationError(
+                    "get_bytes result missing bytes/data field".to_string(),
+                )
+            })?;
 
         parse_hex_bytes(raw)
     }
@@ -473,34 +611,39 @@ impl IdaClient {
         let top = payload
             .as_array()
             .and_then(|arr| arr.first())
-            .ok_or_else(|| IdaError::DeserializationError("basic_blocks response must be non-empty array".to_string()))?;
+            .ok_or_else(|| {
+                IdaError::DeserializationError(
+                    "basic_blocks response must be non-empty array".to_string(),
+                )
+            })?;
         check_error_field(top)?;
 
-        let blocks = top
-            .get("blocks")
-            .and_then(Value::as_array)
-            .ok_or_else(|| IdaError::DeserializationError("basic_blocks response missing blocks".to_string()))?;
+        let blocks = top.get("blocks").and_then(Value::as_array).ok_or_else(|| {
+            IdaError::DeserializationError("basic_blocks response missing blocks".to_string())
+        })?;
 
         let mut parsed = Vec::with_capacity(blocks.len());
         for block in blocks {
-            let start = block
-                .get("start")
-                .and_then(parse_u64)
-                .ok_or_else(|| IdaError::DeserializationError("basic block start missing".to_string()))?;
-            let end = block
-                .get("end")
-                .and_then(parse_u64)
-                .ok_or_else(|| IdaError::DeserializationError("basic block end missing".to_string()))?;
+            let start = block.get("start").and_then(parse_u64).ok_or_else(|| {
+                IdaError::DeserializationError("basic block start missing".to_string())
+            })?;
+            let end = block.get("end").and_then(parse_u64).ok_or_else(|| {
+                IdaError::DeserializationError("basic block end missing".to_string())
+            })?;
 
             let succ_values = block
                 .get("succs")
                 .or_else(|| block.get("successors"))
                 .and_then(Value::as_array)
-                .ok_or_else(|| IdaError::DeserializationError("basic block successors missing".to_string()))?;
+                .ok_or_else(|| {
+                    IdaError::DeserializationError("basic block successors missing".to_string())
+                })?;
             let mut succs = Vec::with_capacity(succ_values.len());
             for succ in succ_values {
                 let parsed_succ = parse_u64(succ).ok_or_else(|| {
-                    IdaError::DeserializationError("invalid basic block successor address".to_string())
+                    IdaError::DeserializationError(
+                        "invalid basic block successor address".to_string(),
+                    )
                 })?;
                 succs.push(parsed_succ);
             }
@@ -556,7 +699,9 @@ fn parse_instruction_object(value: &Value) -> Result<DisasmInstruction> {
     let mnemonic = value
         .get("mnemonic")
         .and_then(Value::as_str)
-        .ok_or_else(|| IdaError::DeserializationError("instruction mnemonic missing".to_string()))?;
+        .ok_or_else(|| {
+            IdaError::DeserializationError("instruction mnemonic missing".to_string())
+        })?;
     let operands = value.get("operands").and_then(Value::as_str).unwrap_or("");
     Ok(DisasmInstruction {
         address,
@@ -588,7 +733,10 @@ fn parse_disassembly_lines(lines: &str) -> Vec<DisasmInstruction> {
             Some(value) => value.trim(),
             None => continue,
         };
-        let address = match u64::from_str_radix(addr_text, 16).ok().or_else(|| parse_hex_or_decimal(addr_text)) {
+        let address = match u64::from_str_radix(addr_text, 16)
+            .ok()
+            .or_else(|| parse_hex_or_decimal(addr_text))
+        {
             Some(value) => value,
             None => continue,
         };
@@ -616,13 +764,18 @@ fn parse_u64(value: &Value) -> Option<u64> {
 
 fn parse_hex_or_decimal(text: &str) -> Option<u64> {
     let trimmed = text.trim();
-    if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+    if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
         return u64::from_str_radix(hex, 16).ok();
     }
     if let Ok(decimal) = u64::from_str(trimmed) {
         return Some(decimal);
     }
-    if trimmed.chars().all(|c| c.is_ascii_hexdigit()) && trimmed.chars().any(|c| c.is_ascii_alphabetic()) {
+    if trimmed.chars().all(|c| c.is_ascii_hexdigit())
+        && trimmed.chars().any(|c| c.is_ascii_alphabetic())
+    {
         return u64::from_str_radix(trimmed, 16).ok();
     }
     None
@@ -638,7 +791,12 @@ fn parse_hex_bytes(text: &str) -> Result<Vec<u8>> {
         cleaned
             .split(|c: char| c.is_ascii_whitespace() || c == ',')
             .filter(|token| !token.is_empty())
-            .map(|token| token.trim_start_matches("0x").trim_start_matches("0X").to_string())
+            .map(|token| {
+                token
+                    .trim_start_matches("0x")
+                    .trim_start_matches("0X")
+                    .to_string()
+            })
             .collect()
     } else {
         let dense = cleaned
@@ -646,7 +804,9 @@ fn parse_hex_bytes(text: &str) -> Result<Vec<u8>> {
             .trim_start_matches("0X")
             .to_string();
         if !dense.len().is_multiple_of(2) {
-            return Err(IdaError::DeserializationError("Invalid hex byte string length".to_string()));
+            return Err(IdaError::DeserializationError(
+                "Invalid hex byte string length".to_string(),
+            ));
         }
         dense
             .as_bytes()
@@ -715,9 +875,11 @@ mod tests {
                 .responses
                 .lock()
                 .map_err(|_| IdaError::IdaResponseError("Mock lock poisoned".to_string()))?;
-            queue
-                .pop_front()
-                .unwrap_or_else(|| Err(IdaError::IdaResponseError("No mock response queued".to_string())))
+            queue.pop_front().unwrap_or_else(|| {
+                Err(IdaError::IdaResponseError(
+                    "No mock response queued".to_string(),
+                ))
+            })
         }
     }
 
