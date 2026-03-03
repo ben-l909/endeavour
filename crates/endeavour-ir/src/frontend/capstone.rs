@@ -142,6 +142,7 @@ fn lift_arm64(state: &mut LiftState, mnemonic: &str, op_str: &str) -> Option<Stm
         "and" => lift_arm64_binary(state, BinOp::And, &operands),
         "orr" => lift_arm64_binary(state, BinOp::Or, &operands),
         "eor" => lift_arm64_binary(state, BinOp::Xor, &operands),
+        "mov" => lift_arm64_mov(state, &operands),
         "lsl" => lift_arm64_binary(state, BinOp::Shl, &operands),
         "lsr" => lift_arm64_binary(state, BinOp::LShr, &operands),
         "asr" => lift_arm64_binary(state, BinOp::AShr, &operands),
@@ -192,6 +193,19 @@ fn lift_arm64_unary(state: &mut LiftState, op: UnOp, operands: &[&str]) -> Optio
     })
 }
 
+fn lift_arm64_mov(state: &mut LiftState, operands: &[&str]) -> Option<Stmt> {
+    if operands.len() != 2 {
+        return None;
+    }
+
+    let dst_reg = normalize_reg(operands[0])?;
+    let width = arm64_reg_width(&dst_reg)?;
+    let src = parse_arm64_operand(state, operands[1], width)?;
+    let dst = state.write_reg(&dst_reg);
+
+    Some(Stmt::Assign { dst, expr: src })
+}
+
 fn parse_arm64_operand(state: &mut LiftState, operand: &str, width: Width) -> Option<Expr> {
     let trimmed = operand.trim();
     if let Some(reg) = normalize_reg(trimmed) {
@@ -226,6 +240,7 @@ fn lift_x86_64(state: &mut LiftState, mnemonic: &str, op_str: &str) -> Option<St
         "and" => lift_x86_64_binary(state, BinOp::And, &operands),
         "or" => lift_x86_64_binary(state, BinOp::Or, &operands),
         "xor" => lift_x86_64_binary(state, BinOp::Xor, &operands),
+        "mov" => lift_x86_64_mov(state, &operands),
         "shl" | "sal" => lift_x86_64_binary(state, BinOp::Shl, &operands),
         "shr" => lift_x86_64_binary(state, BinOp::LShr, &operands),
         "sar" => lift_x86_64_binary(state, BinOp::AShr, &operands),
@@ -275,6 +290,19 @@ fn lift_x86_64_unary(state: &mut LiftState, op: UnOp, operands: &[&str]) -> Opti
             width,
         },
     })
+}
+
+fn lift_x86_64_mov(state: &mut LiftState, operands: &[&str]) -> Option<Stmt> {
+    if operands.len() != 2 {
+        return None;
+    }
+
+    let dst_reg = normalize_reg(operands[0])?;
+    let width = x86_reg_width(&dst_reg)?;
+    let src = parse_x86_operand(state, operands[1], width)?;
+    let dst = state.write_reg(&dst_reg);
+
+    Some(Stmt::Assign { dst, expr: src })
 }
 
 fn parse_x86_operand(state: &mut LiftState, operand: &str, width: Width) -> Option<Expr> {
@@ -375,45 +403,94 @@ fn is_zero_reg(reg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{CapstoneFrontend, InstructionArch};
-    use crate::ir::{BinOp, Expr, Stmt, ValueId, Width};
+    use crate::ir::{BinOp, Expr, Stmt, UnOp, ValueId, Width};
 
-    #[test]
-    fn lifts_arm64_add_register_form() {
-        let frontend = CapstoneFrontend::new();
-        let bytes = [0x20_u8, 0x00, 0x02, 0x8b];
-        let stmts = frontend.lift_bytes(&bytes, InstructionArch::Arm64);
-
-        assert_eq!(
-            stmts,
-            vec![Stmt::Assign {
-                dst: ValueId(2),
+    fn assert_binary_stmt(stmt: &Stmt, op: BinOp) {
+        assert!(matches!(
+            stmt,
+            Stmt::Assign {
+                dst: ValueId(_),
                 expr: Expr::Binary {
-                    op: BinOp::Add,
-                    lhs: Box::new(Expr::Value { id: ValueId(0) }),
-                    rhs: Box::new(Expr::Value { id: ValueId(1) }),
+                    op: actual_op,
+                    lhs,
+                    rhs,
                     width: Width::W64,
                 },
-            }]
-        );
+            } if *actual_op == op
+                && matches!(lhs.as_ref(), Expr::Value { .. })
+                && matches!(rhs.as_ref(), Expr::Value { .. } | Expr::Const { .. })
+        ));
+    }
+
+    fn assert_unary_stmt(stmt: &Stmt, op: UnOp) {
+        assert!(matches!(
+            stmt,
+            Stmt::Assign {
+                dst: ValueId(_),
+                expr: Expr::Unary {
+                    op: actual_op,
+                    arg,
+                    width: Width::W64,
+                },
+            } if *actual_op == op && matches!(arg.as_ref(), Expr::Value { .. })
+        ));
+    }
+
+    fn assert_mov_stmt(stmt: &Stmt) {
+        assert!(matches!(
+            stmt,
+            Stmt::Assign {
+                dst: ValueId(_),
+                expr: Expr::Value { .. },
+            }
+        ));
     }
 
     #[test]
-    fn lifts_x86_64_add_register_form() {
+    fn lifts_arm64_binary_opcode_subset() {
         let frontend = CapstoneFrontend::new();
-        let bytes = [0x48_u8, 0x01, 0xd8];
+        let bytes = [
+            0x20_u8, 0x00, 0x02, 0xcb, 0x20_u8, 0x00, 0x02, 0x8a, 0x20_u8, 0x00, 0x02, 0xaa,
+            0x20_u8, 0x00, 0x02, 0xca,
+        ];
+        let stmts = frontend.lift_bytes(&bytes, InstructionArch::Arm64);
+
+        assert_eq!(stmts.len(), 4);
+        assert_binary_stmt(&stmts[0], BinOp::Sub);
+        assert_binary_stmt(&stmts[1], BinOp::And);
+        assert_binary_stmt(&stmts[2], BinOp::Or);
+        assert_binary_stmt(&stmts[3], BinOp::Xor);
+    }
+
+    #[test]
+    fn lifts_x86_64_binary_opcode_subset() {
+        let frontend = CapstoneFrontend::new();
+        let bytes = [
+            0x48_u8, 0x29, 0xd8, 0x48_u8, 0x21, 0xd8, 0x48_u8, 0x09, 0xd8, 0x48_u8, 0x31, 0xd8,
+            0x48_u8, 0xd1, 0xe0, 0x48_u8, 0xd1, 0xe8,
+        ];
         let stmts = frontend.lift_bytes(&bytes, InstructionArch::X86_64);
 
-        assert_eq!(
-            stmts,
-            vec![Stmt::Assign {
-                dst: ValueId(2),
-                expr: Expr::Binary {
-                    op: BinOp::Add,
-                    lhs: Box::new(Expr::Value { id: ValueId(0) }),
-                    rhs: Box::new(Expr::Value { id: ValueId(1) }),
-                    width: Width::W64,
-                },
-            }]
-        );
+        assert_eq!(stmts.len(), 6);
+        assert_binary_stmt(&stmts[0], BinOp::Sub);
+        assert_binary_stmt(&stmts[1], BinOp::And);
+        assert_binary_stmt(&stmts[2], BinOp::Or);
+        assert_binary_stmt(&stmts[3], BinOp::Xor);
+        assert_binary_stmt(&stmts[4], BinOp::Shl);
+        assert_binary_stmt(&stmts[5], BinOp::LShr);
+    }
+
+    #[test]
+    fn lifts_x86_64_unary_and_mov_subset() {
+        let frontend = CapstoneFrontend::new();
+        let bytes = [
+            0x48_u8, 0x89, 0xd8, 0x48_u8, 0xf7, 0xd0, 0x48_u8, 0xf7, 0xd8,
+        ];
+        let stmts = frontend.lift_bytes(&bytes, InstructionArch::X86_64);
+
+        assert_eq!(stmts.len(), 3);
+        assert_mov_stmt(&stmts[0]);
+        assert_unary_stmt(&stmts[1], UnOp::BitNot);
+        assert_unary_stmt(&stmts[2], UnOp::Neg);
     }
 }
