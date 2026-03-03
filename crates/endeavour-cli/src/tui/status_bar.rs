@@ -7,11 +7,37 @@ pub enum IdaConnectionState {
     Disconnected,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Active IR frontend indicator rendered in the status bar.
+pub enum IrFrontendState {
+    /// IDA-backed IR frontend is active.
+    Ida,
+    /// Capstone-backed IR frontend is active.
+    Capstone,
+    /// No IR frontend is active.
+    #[default]
+    None,
+}
+
+impl IrFrontendState {
+    /// Maps a frontend name to a status-bar IR frontend state.
+    #[must_use]
+    pub fn from_frontend_name(name: Option<&str>) -> Self {
+        match name {
+            Some(frontend) if frontend.eq_ignore_ascii_case("ida") => Self::Ida,
+            Some(frontend) if frontend.eq_ignore_ascii_case("capstone") => Self::Capstone,
+            _ => Self::None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusBarState {
     pub ida: IdaConnectionState,
     pub session_id: Option<String>,
     pub tokens: u64,
+    /// Current active IR frontend for status rendering.
+    pub ir_frontend: IrFrontendState,
 }
 
 impl Default for StatusBarState {
@@ -20,6 +46,7 @@ impl Default for StatusBarState {
             ida: IdaConnectionState::Disconnected,
             session_id: None,
             tokens: 0,
+            ir_frontend: IrFrontendState::None,
         }
     }
 }
@@ -42,9 +69,14 @@ impl StatusBar {
         };
 
         let token_value = Span::styled(format_tokens(state.tokens), Style::default().fg(chalk()));
+        let ir_value = match state.ir_frontend {
+            IrFrontendState::Ida => Span::styled("ida", Style::default().fg(teal())),
+            IrFrontendState::Capstone => Span::styled("capstone", Style::default().fg(amber())),
+            IrFrontendState::None => Span::styled("none", Style::default().fg(copper())),
+        };
         let auth_value = Span::styled("none", Style::default().fg(chalk()));
 
-        let spans = vec![
+        let mut spans = vec![
             dim_span("[IDA: "),
             ida_value,
             dim_span("] "),
@@ -54,10 +86,17 @@ impl StatusBar {
             dim_span("[Tokens: "),
             token_value,
             dim_span("] "),
-            dim_span("[Auth: "),
-            auth_value,
-            dim_span("]"),
         ];
+
+        if state.session_id.is_some() {
+            spans.push(dim_span("[IR: "));
+            spans.push(ir_value);
+            spans.push(dim_span("] "));
+        }
+
+        spans.push(dim_span("[Auth: "));
+        spans.push(auth_value);
+        spans.push(dim_span("]"));
 
         Line::from(truncate_spans(spans, width as usize))
     }
@@ -158,13 +197,17 @@ fn chalk() -> Color {
     Color::Rgb(200, 200, 200)
 }
 
+fn amber() -> Color {
+    Color::Rgb(212, 160, 74)
+}
+
 fn dim() -> Color {
     Color::Rgb(90, 90, 90)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{IdaConnectionState, StatusBar, StatusBarState};
+    use super::{IdaConnectionState, IrFrontendState, StatusBar, StatusBarState};
 
     #[test]
     fn renders_connected_session_and_tokens() {
@@ -172,13 +215,14 @@ mod tests {
             ida: IdaConnectionState::Connected,
             session_id: Some("3f2a1b4c-8e9d-4a2b-b1c3-d4e5f6a7b8c9".to_string()),
             tokens: 4_821,
+            ir_frontend: IrFrontendState::Ida,
         };
 
         let line = StatusBar.render(&state, 120).to_string();
 
         assert_eq!(
             line,
-            "[IDA: connected] [Session: 3f2a1b4c] [Tokens: 4,821] [Auth: none]"
+            "[IDA: connected] [Session: 3f2a1b4c] [Tokens: 4,821] [IR: ida] [Auth: none]"
         );
     }
 
@@ -200,11 +244,28 @@ mod tests {
             ida: IdaConnectionState::Connected,
             session_id: Some("3f2a1b4c-8e9d-4a2b-b1c3-d4e5f6a7b8c9".to_string()),
             tokens: 12_340,
+            ir_frontend: IrFrontendState::Capstone,
         };
 
         let line = StatusBar.render(&state, 40).to_string();
 
         assert_eq!(line.chars().count(), 40);
         assert!(line.ends_with('…'));
+    }
+
+    #[test]
+    fn maps_frontend_names_to_states() {
+        assert_eq!(
+            IrFrontendState::from_frontend_name(Some("ida")),
+            IrFrontendState::Ida
+        );
+        assert_eq!(
+            IrFrontendState::from_frontend_name(Some("capstone")),
+            IrFrontendState::Capstone
+        );
+        assert_eq!(
+            IrFrontendState::from_frontend_name(None),
+            IrFrontendState::None
+        );
     }
 }

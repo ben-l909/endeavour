@@ -8,6 +8,7 @@ use clap::Parser;
 use endeavour_core::store::SessionStore;
 use endeavour_core::Session;
 use endeavour_ida::IdaClient;
+use endeavour_ir::FrontendRegistry;
 use reedline::{DefaultPrompt, DefaultPromptSegment, FileBackedHistory, Reedline, Signal};
 use tokio::runtime::Runtime;
 
@@ -18,6 +19,7 @@ pub(crate) struct Repl {
     pub(crate) store: SessionStore,
     pub(crate) active_session: Option<Session>,
     pub(crate) ida_client: Option<Arc<IdaClient>>,
+    pub(crate) ir_frontends: FrontendRegistry,
     pub(crate) runtime: Runtime,
 }
 
@@ -28,6 +30,7 @@ enum ReplCommand {
     Connect(Option<String>),
     IdaStatus,
     Decompile(String),
+    Lift(String),
     Explain(ExplainCommand),
     Rename(RenameCommand),
     Review,
@@ -96,6 +99,7 @@ impl Repl {
             store,
             active_session: None,
             ida_client: None,
+            ir_frontends: FrontendRegistry::new(),
             runtime,
         })
     }
@@ -170,6 +174,25 @@ impl Repl {
             }
             ParsedLine::Command(ReplCommand::Decompile(target)) => {
                 commands::handle_decompile(self, &target);
+            }
+            ParsedLine::Command(ReplCommand::Lift(target)) => {
+                match commands::handle_lift(&self.ir_frontends, &target) {
+                    Ok(render) => {
+                        if let Some(frontend) = render.active_frontend.as_deref() {
+                            println!("  ● IR frontend: {frontend}");
+                        }
+                        for line in render.preview_lines {
+                            println!("  ● {line}");
+                        }
+                        if let Some(truncation) = render.truncation {
+                            println!(
+                                "  ●   ... {}. Type 'show ir' or press Enter on this line to expand.",
+                                truncation.preview
+                            );
+                        }
+                    }
+                    Err(error) => println!("{}", error.render()),
+                }
             }
             ParsedLine::Command(ReplCommand::Explain(command)) => {
                 if let Err(e) = commands::handle_explain(self, &command) {
@@ -320,6 +343,10 @@ fn parse_command(line: &str) -> ParsedLine {
         "decompile" => match tokens.next() {
             Some(target) => ParsedLine::Command(ReplCommand::Decompile(target.to_string())),
             None => ParsedLine::InvalidUsage("decompile <addr>"),
+        },
+        "lift" => match tokens.next() {
+            Some(target) => ParsedLine::Command(ReplCommand::Lift(target.to_string())),
+            None => ParsedLine::InvalidUsage("lift <hex_address>"),
         },
         "explain" => {
             let args = std::iter::once("explain")
@@ -500,6 +527,7 @@ fn print_help() {
     println!("  connect [host:port]  Connect to IDA MCP (default: localhost:13337)");
     println!("  ida-status           Check IDA connection health");
     println!("  decompile <addr>     Decompile function (0x..., decimal, or sub_...)");
+    println!("  lift <hex_address>   Lift function IR using active frontend");
     println!("  explain <addr> [--provider <claude|gpt|auto|ollama>] [--no-fallback]");
     println!("  rename <addr> <new_name>  Manual rename");
     println!("  rename --llm <addr> [--provider <claude|gpt|auto|ollama>] [--no-fallback]");
@@ -550,6 +578,10 @@ mod tests {
         assert_eq!(
             parse_command("decompile 0x401000"),
             ParsedLine::Command(ReplCommand::Decompile("0x401000".to_string()))
+        );
+        assert_eq!(
+            parse_command("lift 0x401000"),
+            ParsedLine::Command(ReplCommand::Lift("0x401000".to_string()))
         );
         assert_eq!(
             parse_command("explain 0x401000"),
