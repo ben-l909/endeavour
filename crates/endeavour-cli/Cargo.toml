@@ -14,7 +14,12 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 reedline.workspace = true
+owo-colors.workspace = true
+unicode-width.workspace = true
 endeavour-core = { path = "../endeavour-core" }
 
 [dev-dependencies]
 assert_cmd = "2"
+
+[lints]
+workspace = true

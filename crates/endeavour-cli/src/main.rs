@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -6,6 +6,7 @@ use endeavour_core::store::SessionStore;
 use tracing::info;
 
 mod repl;
+pub mod fmt;
 
 /// Endeavour Labs analysis CLI.
 #[derive(Debug, Parser)]
@@ -95,7 +96,7 @@ fn resolve_store_path(configured: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-fn ensure_parent_dir(path: &PathBuf) -> Result<()> {
+fn ensure_parent_dir(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create directory {}", parent.display()))?;
