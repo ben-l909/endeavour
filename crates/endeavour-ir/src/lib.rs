@@ -4,9 +4,11 @@ pub mod error;
 pub mod frontend;
 /// Core Endeavour IR node definitions.
 pub mod ir;
+pub mod normalize;
 
 pub use error::{IrError, Result};
 pub use ir::{BinOp, Expr, Stmt, UnOp, ValueId, Width};
+pub use normalize::{normalize_expr, FrontendRegistry, IrFrontend};
 
 /// Returns the crate package name.
 pub fn crate_name() -> &'static str {
