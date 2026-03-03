@@ -12,6 +12,7 @@ const KNOWN_COMMAND_KEYWORDS: &[&str] = &[
     "review",
     "comment",
     "callgraph",
+    "detect-mba",
     "search",
     "decompile",
     "lift",
@@ -22,6 +23,12 @@ const KNOWN_COMMAND_KEYWORDS: &[&str] = &[
     "cache",
     "help",
     "quit",
+];
+
+const COMMAND_PHRASE_ALIASES: &[(&str, &str)] = &[
+    ("detect mba", "detect-mba"),
+    ("find obfuscation", "detect-mba"),
+    ("scan for mba", "detect-mba"),
 ];
 
 const CURRENT_FUNCTION_REFERENCES: &[&str] = &[
@@ -197,7 +204,19 @@ impl IntentRouter {
 }
 
 fn detect_command(input: &str) -> Option<String> {
-    let stripped = input.trim_start_matches('/');
+    let stripped = input.trim_start_matches('/').trim();
+
+    for (phrase, command) in COMMAND_PHRASE_ALIASES {
+        if let Some(remaining) = strip_case_insensitive_prefix(stripped, phrase) {
+            if remaining.is_empty() || looks_like_command_args(remaining) {
+                if remaining.is_empty() {
+                    return Some((*command).to_string());
+                }
+                return Some(format!("{command} {remaining}"));
+            }
+        }
+    }
+
     let keyword = stripped.split_whitespace().next()?;
 
     // Check if keyword is a known command
@@ -231,6 +250,24 @@ fn detect_command(input: &str) -> Option<String> {
 
     // Otherwise, it's natural language containing a keyword
     None
+}
+
+fn strip_case_insensitive_prefix<'a>(input: &'a str, prefix: &str) -> Option<&'a str> {
+    if input.len() < prefix.len() {
+        return None;
+    }
+
+    let (head, tail) = input.split_at(prefix.len());
+    if !head.eq_ignore_ascii_case(prefix) {
+        return None;
+    }
+
+    if !tail.is_empty() && !tail.starts_with(char::is_whitespace) {
+        return None;
+    }
+
+    let remaining = tail.trim_start();
+    Some(remaining)
 }
 
 fn looks_like_command_args(text: &str) -> bool {
@@ -674,6 +711,28 @@ mod tests {
 
         assert_eq!(outcome, RouteOutcome::CommandDispatched);
         assert_eq!(command_handler.dispatched, vec!["connect localhost:13337"]);
+        assert!(agentic_handler.requests.is_empty());
+    }
+
+    #[test]
+    fn detect_mba_aliases_route_to_detect_mba_command() {
+        let mut controller = controller();
+        let mut command_handler = RecordingCommandHandler::default();
+        let mut agentic_handler = RecordingAgenticHandler::default();
+
+        let router = IntentRouter::new();
+        let outcome = router
+            .route(
+                "find obfuscation 0x100004a20",
+                IntentSessionContext::default(),
+                &mut controller,
+                &mut command_handler,
+                &mut agentic_handler,
+            )
+            .unwrap_or_else(|err| panic!("unexpected routing error: {err}"));
+
+        assert_eq!(outcome, RouteOutcome::CommandDispatched);
+        assert_eq!(command_handler.dispatched, vec!["detect-mba 0x100004a20"]);
         assert!(agentic_handler.requests.is_empty());
     }
 
