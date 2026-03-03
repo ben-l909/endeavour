@@ -4,12 +4,21 @@ use std::{collections::HashMap, collections::HashSet};
 
 use crate::fmt;
 use anyhow::{Context, Result};
+use clap::Parser;
 use endeavour_core::config::Config;
 use endeavour_core::store::SessionStore;
-use endeavour_core::{loader, Session};
+use endeavour_core::{
+    loader, NewReviewQueueRecord, NewTranscriptRecord, ReviewQueueRecord, Session,
+};
 use endeavour_ida::{DecompileResult, IdaClient, IdaError, Transport};
-use endeavour_llm::{create_provider, CompletionRequest, CompletionResponse, LlmError, LlmProvider, Message, Role};
+use endeavour_llm::{
+    AgenticLoopConfig, AgenticLoopController, AnthropicProvider, CompletionRequest, ContextBuilder,
+    FunctionContext, IdaToolExecutor, LlmError, LlmProvider, LlmRouter, Message, OpenAiProvider,
+    ProviderSelection, Role, RouterNotice, TaskType, ToolCall, ToolResult, TranscriptContent,
+    Usage,
+};
 use reedline::{DefaultPrompt, DefaultPromptSegment, FileBackedHistory, Reedline, Signal};
+use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 
 const HISTORY_CAPACITY: usize = 500;
@@ -29,8 +38,9 @@ enum ReplCommand {
     Connect(Option<String>),
     IdaStatus,
     Decompile(String),
-    Explain(String),
-    Rename(String, String),
+    Explain(ExplainCommand),
+    Rename(RenameCommand),
+    Review,
     Comment(String, String),
     Callgraph(String, Option<u32>),
     Search(String),
@@ -43,7 +53,38 @@ enum ReplCommand {
     ConfigSet { key: String, value: String },
     ConfigGet(String),
     ConfigList,
+    ShowTranscript(ShowTranscriptCommand),
     Quit,
+}
+
+#[derive(Debug, Clone, Parser, PartialEq, Eq)]
+struct ExplainCommand {
+    target: String,
+    #[arg(long, default_value = "auto")]
+    provider: String,
+    #[arg(long)]
+    no_fallback: bool,
+}
+
+#[derive(Debug, Clone, Parser, PartialEq, Eq)]
+struct RenameCommand {
+    target: Option<String>,
+    new_name: Option<String>,
+    #[arg(long, default_value_t = false)]
+    llm: bool,
+    #[arg(long, default_value_t = false)]
+    all: bool,
+    #[arg(long, default_value = "auto")]
+    provider: String,
+    #[arg(long)]
+    no_fallback: bool,
+}
+
+#[derive(Debug, Clone, Parser, PartialEq, Eq)]
+struct ShowTranscriptCommand {
+    session_id: Option<String>,
+    #[arg(long)]
+    turn: Option<u32>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -53,6 +94,60 @@ enum ParsedLine {
     Unknown(String),
     InvalidUsage(&'static str),
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct RenameLlmResponse {
+    function_rename: FunctionRenamePayload,
+    variable_renames: Vec<VariableRenamePayload>,
+    comments: Vec<CommentPayload>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct FunctionRenamePayload {
+    proposed_name: Option<String>,
+    confidence: f64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct VariableRenamePayload {
+    current_name: String,
+    proposed_name: String,
+    confidence: f64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct CommentPayload {
+    addr: String,
+    text: String,
+    confidence: f64,
+}
+
+#[derive(Debug, Clone)]
+enum RenameSuggestionKind {
+    Function,
+    Variable,
+    Comment,
+}
+
+#[derive(Debug, Clone)]
+struct RenameSuggestion {
+    kind: RenameSuggestionKind,
+    function_addr: u64,
+    target_addr: u64,
+    current_name: String,
+    proposed_value: String,
+    confidence: f64,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct TierCounters {
+    applied: u32,
+    queued: u32,
+    discarded: u32,
+    errors: u32,
+}
+
+const RENAME_SYSTEM_PROMPT: &str = "You are an expert reverse engineering assistant focused on naming. Return only JSON matching this schema: {\"function_rename\": {\"proposed_name\": \"string | null\", \"confidence\": 0.0}, \"variable_renames\": [{\"current_name\": \"string\", \"proposed_name\": \"string\", \"confidence\": 0.0}], \"comments\": [{\"addr\": \"0x401000\", \"text\": \"string\", \"confidence\": 0.0}]}. Rules: top-level keys must be exactly function_rename, variable_renames, comments; confidence must be in [0,1]; proposed identifiers must match ^[a-zA-Z_][a-zA-Z0-9_]*$; comment addr must match ^0x[0-9a-f]+$; max 20 variable renames and max 10 comments. Return only the JSON object with no markdown or prose.";
 
 impl Repl {
     pub fn new(store: SessionStore) -> Result<Self> {
@@ -96,11 +191,14 @@ impl Repl {
                     ParsedLine::Command(ReplCommand::Decompile(target)) => {
                         self.handle_decompile(&target);
                     }
-                    ParsedLine::Command(ReplCommand::Explain(target)) => {
-                        self.handle_explain(&target)?;
+                    ParsedLine::Command(ReplCommand::Explain(command)) => {
+                        self.handle_explain(&command)?;
                     }
-                    ParsedLine::Command(ReplCommand::Rename(target, new_name)) => {
-                        self.handle_rename(&target, &new_name)?;
+                    ParsedLine::Command(ReplCommand::Rename(command)) => {
+                        self.handle_rename(&command)?;
+                    }
+                    ParsedLine::Command(ReplCommand::Review) => {
+                        self.handle_review()?;
                     }
                     ParsedLine::Command(ReplCommand::Comment(target, comment)) => {
                         self.handle_comment(&target, &comment)?;
@@ -137,6 +235,9 @@ impl Repl {
                     }
                     ParsedLine::Command(ReplCommand::ConfigList) => {
                         self.handle_config_list()?;
+                    }
+                    ParsedLine::Command(ReplCommand::ShowTranscript(command)) => {
+                        self.handle_show_transcript(&command)?;
                     }
                     ParsedLine::Command(ReplCommand::Quit) => break,
                     ParsedLine::Unknown(cmd) => {
@@ -254,13 +355,14 @@ impl Repl {
             return;
         };
 
-        let (address, function_name) = match resolve_target_address(&self.runtime, client.as_ref(), target) {
-            Ok(value) => value,
-            Err(_) => {
-                println!("No function at address");
-                return;
-            }
-        };
+        let (address, function_name) =
+            match resolve_target_address(&self.runtime, client.as_ref(), target) {
+                Ok(value) => value,
+                Err(_) => {
+                    println!("No function at address");
+                    return;
+                }
+            };
 
         let session_id = self.active_session.as_ref().map(|session| session.id);
 
@@ -286,7 +388,9 @@ impl Repl {
 
             if let Some(id) = session_id {
                 if let Ok(serialized) = serde_json::to_string(&fetched) {
-                    let _ = self.store.cache_ida_result(id, "decompile", address, &serialized);
+                    let _ = self
+                        .store
+                        .cache_ida_result(id, "decompile", address, &serialized);
                 }
             }
 
@@ -296,19 +400,20 @@ impl Repl {
         println!("{}", render_decompile_result(&function_name, &result));
     }
 
-    fn handle_explain(&self, target: &str) -> Result<()> {
+    fn handle_explain(&self, command: &ExplainCommand) -> Result<()> {
         let Some(client) = self.ida_client.as_ref() else {
             println!("Not connected. Run: connect <host:port>");
             return Ok(());
         };
 
-        let (address, function_name) = match resolve_target_address(&self.runtime, client.as_ref(), target) {
-            Ok(value) => value,
-            Err(err) => {
-                println!("Failed to resolve target '{target}': {err}");
-                return Ok(());
-            }
-        };
+        let (address, function_name) =
+            match resolve_target_address(&self.runtime, client.as_ref(), &command.target) {
+                Ok(value) => value,
+                Err(err) => {
+                    println!("Failed to resolve target '{}': {err}", command.target);
+                    return Ok(());
+                }
+            };
 
         let decompile_result = match self.runtime.block_on(client.decompile(address)) {
             Ok(value) => value,
@@ -325,38 +430,124 @@ impl Repl {
         println!("Analyzing function at {}...", fmt::format_addr(address));
 
         let config = Config::load().context("failed to load config")?;
-        let api_key_hint = explain_api_key_hint(&config);
-        if !has_llm_api_key(&config) {
-            println!("No API key configured. Run: {api_key_hint}");
-            return Ok(());
-        }
-
-        let provider = match create_provider(&config) {
-            Ok(provider) => provider,
-            Err(LlmError::AuthFailed) => {
-                println!("LLM provider authentication failed. Check your API key with: {api_key_hint}");
+        let provider = match ProviderSelection::parse(&command.provider) {
+            Ok(value) => Some(value),
+            Err(LlmError::Configuration(message)) => {
+                println!("✗ error: {message}");
                 return Ok(());
             }
             Err(err) => {
-                println!("Failed to initialize LLM provider: {}", format_llm_error(&err));
+                println!("✗ error: {}", format_llm_error(&err));
                 return Ok(());
             }
         };
 
-        let request = build_explain_request(&config, &function_name, &decompile_result);
-        let response = match complete_explain_request(&self.runtime, provider.as_ref(), request) {
+        let router = match LlmRouter::new(
+            config.clone(),
+            TaskType::Explain,
+            provider,
+            !command.no_fallback,
+        ) {
+            Ok(router) => router,
+            Err(LlmError::Configuration(message)) => {
+                println!("✗ error: {message}");
+                return Ok(());
+            }
+            Err(err) => {
+                println!("✗ error: {}", format_llm_error(&err));
+                return Ok(());
+            }
+        };
+
+        if matches!(router.notice(), Some(RouterNotice::OllamaNotImplemented)) {
+            println!("  ● INFO  ollama support is planned but not yet available");
+            println!("    ╰─ falling back to auto-routing");
+        }
+
+        if router.plan().auto_routed {
+            println!(
+                "  ● INFO  routing to {} via {} (task: explain)",
+                router.plan().model,
+                router.plan().provider.as_str()
+            );
+        } else {
+            println!(
+                "  ● INFO  using {} via {}",
+                router.plan().model,
+                router.plan().provider.as_str()
+            );
+        }
+
+        let request = build_explain_request(&function_name, &decompile_result);
+        let completion = match self.runtime.block_on(router.complete(request)) {
             Ok(value) => value,
+            Err(LlmError::RateLimited { .. }) if command.no_fallback => {
+                println!("✗ error: provider request failed (fallback disabled)");
+                println!(
+                    "    ╰─ {}: 429 rate limit exceeded",
+                    router.plan().provider.as_str()
+                );
+                println!(
+                    "       re-run without --no-fallback to use {} as fallback",
+                    if router.plan().provider.as_str() == "anthropic" {
+                        "openai"
+                    } else {
+                        "anthropic"
+                    }
+                );
+                return Ok(());
+            }
             Err(err) => {
                 println!("Explain request failed: {}", format_llm_error(&err));
                 return Ok(());
             }
         };
 
-        println!("{}", render_explain_result(&function_name, address, &response.content));
+        if let Some(fallback) = &completion.fallback {
+            println!(
+                "▲ warn: {} rate limited. Falling back to {} via {}. (--no-fallback to disable)",
+                fallback.primary_provider.as_str(),
+                fallback.fallback_model,
+                fallback.fallback_provider.as_str()
+            );
+        }
+
+        println!(
+            "{}",
+            render_explain_result(
+                &function_name,
+                address,
+                &completion.response.model,
+                &completion.response.content,
+            )
+        );
         Ok(())
     }
 
-    fn handle_rename(&self, target: &str, new_name: &str) -> Result<()> {
+    fn handle_rename(&mut self, command: &RenameCommand) -> Result<()> {
+        if command.all {
+            return self.handle_rename_all(command);
+        }
+
+        let Some(target) = command.target.as_deref() else {
+            println!("Usage: rename <addr> <new_name> | rename --llm <addr> | rename --all");
+            return Ok(());
+        };
+
+        let run_llm = command.llm || command.new_name.is_none();
+        if run_llm {
+            return self.handle_rename_llm_single(target, command);
+        }
+
+        let Some(new_name) = command.new_name.as_deref() else {
+            println!("Usage: rename <addr> <new_name>");
+            return Ok(());
+        };
+
+        self.handle_manual_rename(target, new_name)
+    }
+
+    fn handle_manual_rename(&self, target: &str, new_name: &str) -> Result<()> {
         let Some(client) = self.ida_client.as_ref() else {
             println!("Not connected. Run: connect <host:port>");
             return Ok(());
@@ -376,6 +567,659 @@ impl Repl {
         }
 
         Ok(())
+    }
+
+    fn handle_rename_llm_single(&mut self, target: &str, command: &RenameCommand) -> Result<()> {
+        let Some(session) = self.active_session.as_ref() else {
+            print_error(
+                "no active session",
+                &["Run 'analyze <path>' or 'session <id>' to set an active session first."],
+            );
+            return Ok(());
+        };
+
+        let Some(client) = self.ida_client.as_ref() else {
+            print_error(
+                "IDA Pro is not connected",
+                &[
+                    "'rename --llm' requires an active IDA connection.",
+                    "Run 'connect' to connect, then retry.",
+                ],
+            );
+            return Ok(());
+        };
+
+        let (function_addr, function_name) =
+            match resolve_target_address(&self.runtime, client, target) {
+                Ok(value) => value,
+                Err(err) => {
+                    println!("{}", format_resolve_target_error(target, &err));
+                    return Ok(());
+                }
+            };
+
+        let decompile_result = match self.runtime.block_on(client.decompile(function_addr)) {
+            Ok(value) => value,
+            Err(err) => {
+                println!("✗ error: decompile failed: {err}");
+                return Ok(());
+            }
+        };
+
+        let config = Config::load().context("failed to load config")?;
+        let provider_selection = match ProviderSelection::parse(&command.provider) {
+            Ok(value) => Some(value),
+            Err(LlmError::Configuration(message)) => {
+                print_error(&message, &[]);
+                return Ok(());
+            }
+            Err(err) => {
+                print_error(&format_llm_error(&err), &[]);
+                return Ok(());
+            }
+        };
+
+        let router = match LlmRouter::new(
+            config.clone(),
+            TaskType::FastRename,
+            provider_selection,
+            !command.no_fallback,
+        ) {
+            Ok(value) => value,
+            Err(LlmError::Configuration(message)) => {
+                let lower = message.to_ascii_lowercase();
+                if lower.contains("no providers configured") {
+                    print_error(
+                        "no LLM provider configured",
+                        &["Run 'config set anthropic-api-key <key>' or 'config set openai-api-key <key>'."],
+                    );
+                } else {
+                    print_error(&message, &[]);
+                }
+                return Ok(());
+            }
+            Err(err) => {
+                print_error(&format_llm_error(&err), &[]);
+                return Ok(());
+            }
+        };
+
+        let provider = match build_provider_for_plan(&config, router.plan().provider) {
+            Ok(value) => value,
+            Err(message) => {
+                print_error(&message, &[]);
+                return Ok(());
+            }
+        };
+
+        println!(
+            "  Analyzing {} ({}) via {}...",
+            function_name,
+            fmt::format_addr(function_addr),
+            router.plan().model
+        );
+
+        let llm_result_result = match &provider {
+            RenameProvider::Anthropic(provider) => self.runtime.block_on(run_rename_agentic_loop(
+                provider,
+                client.clone(),
+                &router.plan().model,
+                function_addr,
+                &function_name,
+                &decompile_result.pseudocode,
+            )),
+            RenameProvider::OpenAi(provider) => self.runtime.block_on(run_rename_agentic_loop(
+                provider,
+                client.clone(),
+                &router.plan().model,
+                function_addr,
+                &function_name,
+                &decompile_result.pseudocode,
+            )),
+        };
+        let llm_result = match llm_result_result {
+            Ok(value) => value,
+            Err(err) => {
+                print_error("rename analysis failed", &[&format_llm_error(&err)]);
+                return Ok(());
+            }
+        };
+
+        let response = match parse_rename_json_payload(&llm_result.final_text) {
+            Ok(value) => value,
+            Err(message) => {
+                print_error("LLM returned malformed JSON", &[&message]);
+                return Ok(());
+            }
+        };
+
+        persist_agentic_transcript(&self.store, session.id, &llm_result)?;
+
+        let suggestions = match build_suggestions(
+            function_addr,
+            &function_name,
+            response,
+            &self.store,
+            session.id,
+        ) {
+            Ok(value) => value,
+            Err(message) => {
+                print_error("LLM response failed validation", &[&message]);
+                return Ok(());
+            }
+        };
+
+        let counters = self.apply_suggestions_and_render(session.id, client, suggestions)?;
+        println!(
+            "\n  Applied: {}   Queued: {}   Discarded: {}",
+            counters.applied, counters.queued, counters.discarded
+        );
+        if counters.queued > 0 {
+            println!("\n  Run 'review' to inspect queued suggestions.");
+        }
+
+        Ok(())
+    }
+
+    fn handle_rename_all(&mut self, command: &RenameCommand) -> Result<()> {
+        let Some(session) = self.active_session.as_ref() else {
+            print_error(
+                "no active session",
+                &["Run 'analyze <path>' or 'session <id>' to set an active session first."],
+            );
+            return Ok(());
+        };
+
+        let Some(client) = self.ida_client.as_ref() else {
+            print_error(
+                "IDA Pro is not connected",
+                &[
+                    "'rename --llm' requires an active IDA connection.",
+                    "Run 'connect' to connect, then retry.",
+                ],
+            );
+            return Ok(());
+        };
+
+        let config = Config::load().context("failed to load config")?;
+        let provider_selection = ProviderSelection::parse(&command.provider).ok();
+        let router = match LlmRouter::new(
+            config.clone(),
+            TaskType::FastRename,
+            provider_selection,
+            !command.no_fallback,
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                print_error(&format_llm_error(&err), &[]);
+                return Ok(());
+            }
+        };
+
+        let provider = match build_provider_for_plan(&config, router.plan().provider) {
+            Ok(value) => value,
+            Err(message) => {
+                print_error(&message, &[]);
+                return Ok(());
+            }
+        };
+
+        let all_functions = self.runtime.block_on(client.list_functions(None, None))?;
+        let generic_functions: Vec<_> = all_functions
+            .into_iter()
+            .filter(|f| is_generic_function_name(&f.name))
+            .collect();
+
+        println!(
+            "  Found {} functions with generic names. Starting LLM rename...\n",
+            generic_functions.len()
+        );
+
+        let mut totals = TierCounters::default();
+        let mut skipped = 0u32;
+
+        for (index, function) in generic_functions.iter().enumerate() {
+            let current = index as u32 + 1;
+            let total = generic_functions.len() as u32;
+            let decompile_result = match self.runtime.block_on(client.decompile(function.address)) {
+                Ok(value) => value,
+                Err(err) => {
+                    totals.errors += 1;
+                    println!(
+                        "  [{}/{}]  {}  {}  ->  ✗ decompile failed: {}",
+                        current,
+                        total,
+                        fmt::format_addr(function.address),
+                        function.name,
+                        err
+                    );
+                    continue;
+                }
+            };
+
+            let llm_result_result = match &provider {
+                RenameProvider::Anthropic(provider) => {
+                    self.runtime.block_on(run_rename_agentic_loop(
+                        provider,
+                        client.clone(),
+                        &router.plan().model,
+                        function.address,
+                        &function.name,
+                        &decompile_result.pseudocode,
+                    ))
+                }
+                RenameProvider::OpenAi(provider) => self.runtime.block_on(run_rename_agentic_loop(
+                    provider,
+                    client.clone(),
+                    &router.plan().model,
+                    function.address,
+                    &function.name,
+                    &decompile_result.pseudocode,
+                )),
+            };
+            let llm_result = match llm_result_result {
+                Ok(value) => value,
+                Err(err) => {
+                    totals.errors += 1;
+                    println!(
+                        "  [{}/{}]  {}  {}  ->  ✗ {}",
+                        current,
+                        total,
+                        fmt::format_addr(function.address),
+                        function.name,
+                        format_llm_error(&err)
+                    );
+                    continue;
+                }
+            };
+
+            let response = match parse_rename_json_payload(&llm_result.final_text) {
+                Ok(value) => value,
+                Err(_) => {
+                    totals.errors += 1;
+                    println!(
+                        "  [{}/{}]  {}  {}  ->  ✗ error: malformed LLM response (saved to debug log)",
+                        current,
+                        total,
+                        fmt::format_addr(function.address),
+                        function.name,
+                    );
+                    continue;
+                }
+            };
+
+            persist_agentic_transcript(&self.store, session.id, &llm_result)?;
+
+            let suggestions = match build_suggestions(
+                function.address,
+                &function.name,
+                response,
+                &self.store,
+                session.id,
+            ) {
+                Ok(value) => value,
+                Err(_) => {
+                    totals.errors += 1;
+                    println!(
+                        "  [{}/{}]  {}  {}  ->  ✗ error: malformed LLM response (saved to debug log)",
+                        current,
+                        total,
+                        fmt::format_addr(function.address),
+                        function.name,
+                    );
+                    continue;
+                }
+            };
+
+            let function_result =
+                self.apply_suggestions_without_detail(session.id, client, suggestions)?;
+            totals.applied += function_result.applied;
+            totals.queued += function_result.queued;
+            totals.discarded += function_result.discarded;
+            totals.errors += function_result.errors;
+
+            if let Some((name, confidence, marker)) = function_result.function_line {
+                println!(
+                    "  [{}/{}]  {}  {}  ->  {}  ({:.2})  {}",
+                    current,
+                    total,
+                    fmt::format_addr(function.address),
+                    function.name,
+                    name,
+                    confidence,
+                    marker
+                );
+            } else {
+                skipped += 1;
+                println!(
+                    "  [{}/{}]  {}  {}  ->  (no rename suggested)",
+                    current,
+                    total,
+                    fmt::format_addr(function.address),
+                    function.name,
+                );
+            }
+        }
+
+        println!("\n  {}", "═".repeat(88));
+        println!("\n  Batch complete.");
+        if totals.errors > 0 {
+            println!(
+                "  Applied: {}   Queued: {}   Discarded: {}   Errors: {}   Skipped (no suggestion): {}",
+                totals.applied, totals.queued, totals.discarded, totals.errors, skipped
+            );
+            println!(
+                "\n  {} functions failed. Run 'findings' to see error details.",
+                totals.errors
+            );
+        } else {
+            println!(
+                "  Applied: {}   Queued: {}   Discarded: {}   Skipped (no suggestion): {}",
+                totals.applied, totals.queued, totals.discarded, skipped
+            );
+        }
+        if totals.queued > 0 {
+            println!(
+                "\n  Run 'review' to inspect {} queued suggestions.",
+                totals.queued
+            );
+        }
+
+        Ok(())
+    }
+
+    fn handle_review(&mut self) -> Result<()> {
+        let Some(session) = self.active_session.as_ref() else {
+            print_error(
+                "no active session",
+                &["Run 'analyze <path>' or 'session <id>' to set an active session first."],
+            );
+            return Ok(());
+        };
+
+        loop {
+            let pending = self.store.list_pending_review_queue(session.id)?;
+            if pending.is_empty() {
+                println!("\n  No pending suggestions. Queue is empty.");
+                return Ok(());
+            }
+
+            println!("\n  Review Queue  ({} pending)", pending.len());
+            println!("  {}", "═".repeat(88));
+            println!("\n   #   Address       Current Name    Proposed Name     Confidence");
+            println!("  {}", "─".repeat(84));
+            for (index, item) in pending.iter().enumerate() {
+                println!(
+                    "  {:>2}   {:<12}  {:<14}  {:<16}  {:.2}",
+                    index + 1,
+                    fmt::format_addr(item.target_addr.unwrap_or(item.function_addr)),
+                    truncate_for_review(&item.current_name, 14),
+                    truncate_for_review(&item.proposed_value, 16),
+                    item.confidence
+                );
+            }
+            println!("\n  {}", "═".repeat(88));
+            println!("\n  Commands: [a]ccept  [r]eject  [A]ccept all  [R]eject all  [q]uit");
+            let input = read_prompt("  Enter number to select, or command: ")?;
+
+            match input.as_str() {
+                "q" => return Ok(()),
+                "A" => {
+                    let result = self.accept_all_review(session.id, &pending)?;
+                    println!("\n  ✓ Accepted {} suggestions. Applied to IDA.", result.0);
+                    if result.1 > 0 {
+                        println!(
+                            "  ✗ {} item was rejected by IDA — see transcript for details.",
+                            result.1
+                        );
+                    }
+                }
+                "R" => {
+                    let changed = self
+                        .store
+                        .update_all_review_queue_status(session.id, "pending", "rejected")?;
+                    for item in &pending {
+                        log_review_rejected(&self.store, session.id, item)?;
+                    }
+                    println!("\n  ✗ Rejected {} suggestions. Queue cleared.", changed);
+                }
+                "a" => {
+                    if let Some(first) = pending.first() {
+                        self.apply_review_item(session.id, first)?;
+                    }
+                }
+                "r" => {
+                    if let Some(first) = pending.first() {
+                        self.store
+                            .update_review_queue_status(first.id, "rejected")?;
+                        log_review_rejected(&self.store, session.id, first)?;
+                        println!(
+                            "\n  ✗ Rejected: {}  ->  {}  at {}",
+                            first.current_name,
+                            first.proposed_value,
+                            fmt::format_addr(first.target_addr.unwrap_or(first.function_addr))
+                        );
+                    }
+                }
+                _ => {
+                    if let Ok(index) = input.parse::<usize>() {
+                        if index == 0 || index > pending.len() {
+                            println!(
+                                "\n  Invalid selection. Enter a number between 1 and {}.",
+                                pending.len()
+                            );
+                            continue;
+                        }
+                        let item = &pending[index - 1];
+                        println!(
+                            "\n  Selected: {}  ->  {}  ({:.2})",
+                            item.current_name, item.proposed_value, item.confidence
+                        );
+                        let action = read_prompt("  [a]ccept  [r]eject  [s]kip: ")?;
+                        match action.as_str() {
+                            "a" => self.apply_review_item(session.id, item)?,
+                            "r" => {
+                                self.store.update_review_queue_status(item.id, "rejected")?;
+                                log_review_rejected(&self.store, session.id, item)?;
+                                println!(
+                                    "\n  ✗ Rejected: {}  ->  {}  at {}",
+                                    item.current_name,
+                                    item.proposed_value,
+                                    fmt::format_addr(
+                                        item.target_addr.unwrap_or(item.function_addr)
+                                    )
+                                );
+                            }
+                            "s" => {}
+                            _ => {
+                                println!("\n  Unknown command. Use [a]ccept, [r]eject, or [s]kip.")
+                            }
+                        }
+                    } else {
+                        println!(
+                            "\n  Unknown command. Use [a]ccept, [r]eject, [A]ccept all, [R]eject all, or [q]uit."
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn apply_suggestions_and_render(
+        &self,
+        session_id: uuid::Uuid,
+        client: &IdaClient,
+        suggestions: Vec<RenameSuggestion>,
+    ) -> Result<TierCounters> {
+        let mut counters = TierCounters::default();
+        let mut applied_lines = Vec::new();
+        let mut queued_lines = Vec::new();
+
+        for suggestion in suggestions {
+            match classify_confidence(suggestion.confidence) {
+                ConfidenceTier::Tier1 => {
+                    if apply_suggestion(&self.runtime, client, &suggestion).is_ok() {
+                        counters.applied += 1;
+                        applied_lines.push(render_applied_line(&suggestion));
+                    } else {
+                        counters.errors += 1;
+                        log_ida_rejected(&self.store, session_id, &suggestion)?;
+                    }
+                }
+                ConfidenceTier::Tier2 => {
+                    counters.queued += 1;
+                    queue_suggestion(&self.store, session_id, &suggestion)?;
+                    queued_lines.push(render_queued_line(&suggestion));
+                }
+                ConfidenceTier::Tier3 => {
+                    counters.discarded += 1;
+                    log_discarded(&self.store, session_id, &suggestion)?;
+                }
+            }
+        }
+
+        if !applied_lines.is_empty() || !queued_lines.is_empty() {
+            println!();
+        }
+        for line in applied_lines {
+            println!("{line}");
+        }
+        for line in queued_lines {
+            println!("{line}");
+        }
+
+        Ok(counters)
+    }
+
+    fn apply_suggestions_without_detail(
+        &self,
+        session_id: uuid::Uuid,
+        client: &IdaClient,
+        suggestions: Vec<RenameSuggestion>,
+    ) -> Result<BatchFunctionResult> {
+        let mut counters = TierCounters::default();
+        let mut function_line = None;
+
+        for suggestion in suggestions {
+            match classify_confidence(suggestion.confidence) {
+                ConfidenceTier::Tier1 => {
+                    if apply_suggestion(&self.runtime, client, &suggestion).is_ok() {
+                        counters.applied += 1;
+                        if matches!(suggestion.kind, RenameSuggestionKind::Function) {
+                            function_line = Some((
+                                suggestion.proposed_value.clone(),
+                                suggestion.confidence,
+                                "✓".to_string(),
+                            ));
+                        }
+                    } else {
+                        counters.errors += 1;
+                        log_ida_rejected(&self.store, session_id, &suggestion)?;
+                    }
+                }
+                ConfidenceTier::Tier2 => {
+                    counters.queued += 1;
+                    queue_suggestion(&self.store, session_id, &suggestion)?;
+                    if matches!(suggestion.kind, RenameSuggestionKind::Function) {
+                        function_line = Some((
+                            suggestion.proposed_value.clone(),
+                            suggestion.confidence,
+                            "~".to_string(),
+                        ));
+                    }
+                }
+                ConfidenceTier::Tier3 => {
+                    counters.discarded += 1;
+                    log_discarded(&self.store, session_id, &suggestion)?;
+                }
+            }
+        }
+
+        Ok(BatchFunctionResult {
+            applied: counters.applied,
+            queued: counters.queued,
+            discarded: counters.discarded,
+            errors: counters.errors,
+            function_line,
+        })
+    }
+
+    fn apply_review_item(&self, session_id: uuid::Uuid, item: &ReviewQueueRecord) -> Result<()> {
+        let Some(client) = self.ida_client.as_ref() else {
+            print_error(
+                "IDA Pro is not connected",
+                &["Cannot apply rename. Run 'connect' first, then retry 'review'."],
+            );
+            return Ok(());
+        };
+
+        let result = match item.kind.as_str() {
+            "function_rename" => self.runtime.block_on(client.rename_function(
+                item.target_addr.unwrap_or(item.function_addr),
+                &item.proposed_value,
+            )),
+            "variable_rename" => self.runtime.block_on(client.rename_local(
+                item.function_addr,
+                &item.current_name,
+                &item.proposed_value,
+            )),
+            "comment" => self.runtime.block_on(client.set_comment(
+                item.target_addr.unwrap_or(item.function_addr),
+                &item.proposed_value,
+            )),
+            _ => Ok(()),
+        };
+
+        if result.is_err() {
+            print_error(
+                &format!(
+                    "IDA rejected rename '{}' at {}",
+                    item.proposed_value,
+                    fmt::format_addr(item.target_addr.unwrap_or(item.function_addr))
+                ),
+                &[
+                    "Name may already exist or contain invalid characters.",
+                    "Suggestion logged to transcript.",
+                ],
+            );
+            return Ok(());
+        }
+
+        self.store.update_review_queue_status(item.id, "accepted")?;
+        println!(
+            "\n  ✓ Applied: {}  ->  {}  at {}",
+            item.current_name,
+            item.proposed_value,
+            fmt::format_addr(item.target_addr.unwrap_or(item.function_addr))
+        );
+        let _ = session_id;
+        Ok(())
+    }
+
+    fn accept_all_review(
+        &self,
+        session_id: uuid::Uuid,
+        pending: &[ReviewQueueRecord],
+    ) -> Result<(u32, u32)> {
+        let mut applied = 0u32;
+        let mut failed = 0u32;
+
+        for item in pending {
+            let before = applied;
+            self.apply_review_item(session_id, item)?;
+            let is_pending = self
+                .store
+                .list_pending_review_queue(session_id)?
+                .iter()
+                .any(|entry| entry.id == item.id);
+            if is_pending {
+                failed += 1;
+            } else if applied == before {
+                applied += 1;
+            }
+        }
+
+        Ok((applied, failed))
     }
 
     fn handle_comment(&self, target: &str, comment: &str) -> Result<()> {
@@ -586,6 +1430,487 @@ impl Repl {
 
         Ok(())
     }
+
+    fn handle_show_transcript(&self, command: &ShowTranscriptCommand) -> Result<()> {
+        let session_id = if let Some(session_id) = &command.session_id {
+            session_id
+                .parse()
+                .with_context(|| format!("invalid session id: {session_id}"))?
+        } else if let Some(active_session) = &self.active_session {
+            active_session.id
+        } else {
+            println!("No active session. Use 'session <id>' or pass show-transcript <session_id>.");
+            return Ok(());
+        };
+
+        let entries = self
+            .store
+            .get_transcript_entries(session_id, command.turn)
+            .with_context(|| format!("failed to load transcript for session {session_id}"))?;
+
+        if entries.is_empty() {
+            println!("  ● INFO  no transcript found for session {session_id}");
+            return Ok(());
+        }
+
+        println!("{}", render_transcript_output(session_id, &entries));
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct BatchFunctionResult {
+    applied: u32,
+    queued: u32,
+    discarded: u32,
+    errors: u32,
+    function_line: Option<(String, f64, String)>,
+}
+
+enum RenameProvider {
+    Anthropic(AnthropicProvider),
+    OpenAi(OpenAiProvider),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ConfidenceTier {
+    Tier1,
+    Tier2,
+    Tier3,
+}
+
+fn classify_confidence(confidence: f64) -> ConfidenceTier {
+    if confidence >= 0.7 {
+        ConfidenceTier::Tier1
+    } else if confidence >= 0.5 {
+        ConfidenceTier::Tier2
+    } else {
+        ConfidenceTier::Tier3
+    }
+}
+
+fn is_generic_function_name(name: &str) -> bool {
+    name.starts_with("sub_") || name.starts_with("j_sub_") || name.starts_with("nullsub_")
+}
+
+fn is_valid_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn parse_comment_addr(value: &str) -> Option<u64> {
+    let normalized = value.trim();
+    if !normalized.starts_with("0x") {
+        return None;
+    }
+    if normalized
+        .chars()
+        .skip(2)
+        .any(|ch| !ch.is_ascii_hexdigit() || ch.is_ascii_uppercase())
+    {
+        return None;
+    }
+    u64::from_str_radix(&normalized[2..], 16).ok()
+}
+
+fn truncate_for_review(value: &str, width: usize) -> String {
+    let mut output = String::new();
+    if value.chars().count() <= width {
+        return value.to_string();
+    }
+    for ch in value.chars().take(width.saturating_sub(1)) {
+        output.push(ch);
+    }
+    output.push('…');
+    output
+}
+
+fn print_error(summary: &str, details: &[&str]) {
+    println!("✗ error: {summary}");
+    if let Some((first, rest)) = details.split_first() {
+        println!("    ╰─ {first}");
+        for detail in rest {
+            println!("       {detail}");
+        }
+    }
+}
+
+fn read_prompt(prompt: &str) -> Result<String> {
+    use std::io::Write;
+
+    print!("{prompt}");
+    std::io::stdout().flush()?;
+    let mut buf = String::new();
+    std::io::stdin().read_line(&mut buf)?;
+    Ok(buf.trim().to_string())
+}
+
+fn build_provider_for_plan(
+    config: &Config,
+    provider: endeavour_llm::BackendProvider,
+) -> std::result::Result<RenameProvider, String> {
+    match provider {
+        endeavour_llm::BackendProvider::Anthropic => config
+            .anthropic_api_key
+            .clone()
+            .map(|api_key| RenameProvider::Anthropic(AnthropicProvider::new(api_key)))
+            .ok_or_else(|| "no LLM provider configured".to_string()),
+        endeavour_llm::BackendProvider::OpenAi => config
+            .openai_api_key
+            .clone()
+            .map(|api_key| RenameProvider::OpenAi(OpenAiProvider::new(api_key)))
+            .ok_or_else(|| "no LLM provider configured".to_string()),
+    }
+}
+
+async fn run_rename_agentic_loop<P: LlmProvider>(
+    provider: &P,
+    client: Arc<IdaClient>,
+    model: &str,
+    function_addr: u64,
+    function_name: &str,
+    pseudocode: &str,
+) -> std::result::Result<endeavour_llm::AgenticLoopResult, LlmError> {
+    let tool_executor = IdaToolExecutor::new(client);
+    let builder = ContextBuilder::new(model)
+        .with_system_prompt(RENAME_SYSTEM_PROMPT)
+        .with_history(vec![Message {
+            role: Role::User,
+            content: format!(
+                "Analyze function {} at {} and propose names and comments.",
+                function_name,
+                fmt::format_addr(function_addr)
+            ),
+            tool_results: Vec::new(),
+        }])
+        .with_function_context(FunctionContext {
+            function_name: Some(function_name.to_string()),
+            address: Some(function_addr),
+            decompiled_code: pseudocode.to_string(),
+            xrefs: Vec::new(),
+            strings: Vec::new(),
+        })
+        .with_temperature(0.1)
+        .with_max_tokens(1_200)
+        .with_tools(IdaToolExecutor::tool_definitions());
+
+    let mut controller = AgenticLoopController::new(AgenticLoopConfig {
+        max_steps: 4,
+        ..AgenticLoopConfig::default()
+    });
+
+    controller
+        .run(provider, builder, &tool_executor, None)
+        .await
+        .map_err(|err| LlmError::Configuration(err.to_string()))
+}
+
+fn parse_rename_json_payload(raw: &str) -> std::result::Result<RenameLlmResponse, String> {
+    let value: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|_| "Expected rename schema at top level.".to_string())?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "Expected rename schema at top level.".to_string())?;
+
+    let mut keys = object.keys().cloned().collect::<Vec<_>>();
+    keys.sort();
+    if keys != ["comments", "function_rename", "variable_renames"] {
+        return Err("Expected rename schema at top level.".to_string());
+    }
+
+    serde_json::from_value(value).map_err(|_| "Expected rename schema at top level.".to_string())
+}
+
+fn build_suggestions(
+    function_addr: u64,
+    function_name: &str,
+    response: RenameLlmResponse,
+    store: &SessionStore,
+    session_id: uuid::Uuid,
+) -> std::result::Result<Vec<RenameSuggestion>, String> {
+    if !(0.0..=1.0).contains(&response.function_rename.confidence) {
+        return Err(format!(
+            "Field 'confidence' out of range (got: {}, expected: 0.0-1.0).",
+            response.function_rename.confidence
+        ));
+    }
+
+    let mut suggestions = Vec::new();
+    if let Some(name) = response.function_rename.proposed_name {
+        if is_valid_identifier(&name) {
+            suggestions.push(RenameSuggestion {
+                kind: RenameSuggestionKind::Function,
+                function_addr,
+                target_addr: function_addr,
+                current_name: function_name.to_string(),
+                proposed_value: name,
+                confidence: response.function_rename.confidence,
+            });
+        } else {
+            let _ = append_transcript_line(
+                store,
+                session_id,
+                format!(
+                    "[SKIPPED] invalid identifier for function rename: '{}'",
+                    name
+                ),
+            );
+        }
+    }
+
+    for variable in response.variable_renames.into_iter().take(20) {
+        if !(0.0..=1.0).contains(&variable.confidence) {
+            return Err(format!(
+                "Field 'confidence' out of range (got: {}, expected: 0.0-1.0).",
+                variable.confidence
+            ));
+        }
+        if !is_valid_identifier(&variable.proposed_name) {
+            let _ = append_transcript_line(
+                store,
+                session_id,
+                format!(
+                    "[SKIPPED] invalid identifier for variable rename: '{}'",
+                    variable.proposed_name
+                ),
+            );
+            continue;
+        }
+        suggestions.push(RenameSuggestion {
+            kind: RenameSuggestionKind::Variable,
+            function_addr,
+            target_addr: function_addr,
+            current_name: variable.current_name,
+            proposed_value: variable.proposed_name,
+            confidence: variable.confidence,
+        });
+    }
+
+    for comment in response.comments.into_iter().take(10) {
+        if !(0.0..=1.0).contains(&comment.confidence) {
+            return Err(format!(
+                "Field 'confidence' out of range (got: {}, expected: 0.0-1.0).",
+                comment.confidence
+            ));
+        }
+        let Some(addr) = parse_comment_addr(&comment.addr) else {
+            let _ = append_transcript_line(
+                store,
+                session_id,
+                format!("[SKIPPED] invalid comment address: '{}'", comment.addr),
+            );
+            continue;
+        };
+        suggestions.push(RenameSuggestion {
+            kind: RenameSuggestionKind::Comment,
+            function_addr,
+            target_addr: addr,
+            current_name: "comment".to_string(),
+            proposed_value: comment.text,
+            confidence: comment.confidence,
+        });
+    }
+
+    suggestions.sort_by_key(|item| match item.kind {
+        RenameSuggestionKind::Function => 0,
+        RenameSuggestionKind::Comment => 1,
+        RenameSuggestionKind::Variable => 2,
+    });
+
+    Ok(suggestions)
+}
+
+fn apply_suggestion(
+    runtime: &Runtime,
+    client: &IdaClient,
+    suggestion: &RenameSuggestion,
+) -> Result<()> {
+    match suggestion.kind {
+        RenameSuggestionKind::Function => runtime
+            .block_on(client.rename_function(suggestion.target_addr, &suggestion.proposed_value))
+            .map_err(anyhow::Error::from),
+        RenameSuggestionKind::Variable => runtime
+            .block_on(client.rename_local(
+                suggestion.function_addr,
+                &suggestion.current_name,
+                &suggestion.proposed_value,
+            ))
+            .map_err(anyhow::Error::from),
+        RenameSuggestionKind::Comment => runtime
+            .block_on(client.set_comment(suggestion.target_addr, &suggestion.proposed_value))
+            .map_err(anyhow::Error::from),
+    }
+}
+
+fn queue_suggestion(
+    store: &SessionStore,
+    session_id: uuid::Uuid,
+    suggestion: &RenameSuggestion,
+) -> Result<()> {
+    store.add_review_queue_entry(
+        session_id,
+        &NewReviewQueueRecord {
+            kind: match suggestion.kind {
+                RenameSuggestionKind::Function => "function_rename".to_string(),
+                RenameSuggestionKind::Variable => "variable_rename".to_string(),
+                RenameSuggestionKind::Comment => "comment".to_string(),
+            },
+            function_addr: suggestion.function_addr,
+            target_addr: Some(suggestion.target_addr),
+            current_name: suggestion.current_name.clone(),
+            proposed_value: suggestion.proposed_value.clone(),
+            confidence: suggestion.confidence,
+        },
+    )?;
+    Ok(())
+}
+
+fn render_applied_line(suggestion: &RenameSuggestion) -> String {
+    match suggestion.kind {
+        RenameSuggestionKind::Comment => format!(
+            "  ✓ {}  comment set: \"{}\"  ({:.2})",
+            fmt::format_addr(suggestion.target_addr),
+            suggestion.proposed_value,
+            suggestion.confidence
+        ),
+        _ => format!(
+            "  ✓ {}  {}  ->  {}  ({:.2})",
+            fmt::format_addr(suggestion.target_addr),
+            suggestion.current_name,
+            suggestion.proposed_value,
+            suggestion.confidence
+        ),
+    }
+}
+
+fn render_queued_line(suggestion: &RenameSuggestion) -> String {
+    if matches!(suggestion.kind, RenameSuggestionKind::Comment) {
+        format!(
+            "  ~ {}  comment  ->  {}  ({:.2})  queued for review",
+            fmt::format_addr(suggestion.target_addr),
+            suggestion.proposed_value,
+            suggestion.confidence
+        )
+    } else {
+        format!(
+            "  ~ {}  {}  ->  {}  ({:.2})  queued for review",
+            fmt::format_addr(suggestion.target_addr),
+            suggestion.current_name,
+            suggestion.proposed_value,
+            suggestion.confidence
+        )
+    }
+}
+
+fn persist_agentic_transcript(
+    store: &SessionStore,
+    session_id: uuid::Uuid,
+    result: &endeavour_llm::AgenticLoopResult,
+) -> Result<()> {
+    let mut records = Vec::new();
+    for turn in &result.transcript {
+        records.push(NewTranscriptRecord {
+            turn_number: turn.round,
+            role: "llm".to_string(),
+            timestamp: "0".to_string(),
+            content_json: serde_json::to_string(&TranscriptContent::Message(Message {
+                role: Role::Assistant,
+                content: turn.assistant_text.clone(),
+                tool_results: Vec::new(),
+            }))?,
+            usage_json: turn.usage.as_ref().map(serde_json::to_string).transpose()?,
+            state: "llm_streaming".to_string(),
+            tool_calls_json: Some(serde_json::to_string(&turn.tool_calls)?),
+        });
+    }
+    if !records.is_empty() {
+        store.add_transcript_entries(session_id, &records)?;
+    }
+    Ok(())
+}
+
+fn append_transcript_line(
+    store: &SessionStore,
+    session_id: uuid::Uuid,
+    content: String,
+) -> Result<()> {
+    store.add_transcript_entries(
+        session_id,
+        &[NewTranscriptRecord {
+            turn_number: 0,
+            role: "system".to_string(),
+            timestamp: "0".to_string(),
+            content_json: serde_json::to_string(&TranscriptContent::Message(Message {
+                role: Role::System,
+                content,
+                tool_results: Vec::new(),
+            }))?,
+            usage_json: None,
+            state: "done_success".to_string(),
+            tool_calls_json: None,
+        }],
+    )?;
+    Ok(())
+}
+
+fn log_discarded(
+    store: &SessionStore,
+    session_id: uuid::Uuid,
+    suggestion: &RenameSuggestion,
+) -> Result<()> {
+    append_transcript_line(
+        store,
+        session_id,
+        format!(
+            "[DISCARDED] {}  {}  ->  {}  ({:.2})",
+            fmt::format_addr(suggestion.target_addr),
+            suggestion.current_name,
+            suggestion.proposed_value,
+            suggestion.confidence
+        ),
+    )
+}
+
+fn log_ida_rejected(
+    store: &SessionStore,
+    session_id: uuid::Uuid,
+    suggestion: &RenameSuggestion,
+) -> Result<()> {
+    append_transcript_line(
+        store,
+        session_id,
+        format!(
+            "[IDA_REJECTED] {}  {}  ->  {}  ({:.2})",
+            fmt::format_addr(suggestion.target_addr),
+            suggestion.current_name,
+            suggestion.proposed_value,
+            suggestion.confidence
+        ),
+    )
+}
+
+fn log_review_rejected(
+    store: &SessionStore,
+    session_id: uuid::Uuid,
+    item: &ReviewQueueRecord,
+) -> Result<()> {
+    append_transcript_line(
+        store,
+        session_id,
+        format!(
+            "[REJECTED] {}  {}  ->  {}  ({:.2})",
+            fmt::format_addr(item.target_addr.unwrap_or(item.function_addr)),
+            item.current_name,
+            item.proposed_value,
+            item.confidence
+        ),
+    )
 }
 
 fn parse_command(line: &str) -> ParsedLine {
@@ -617,23 +1942,35 @@ fn parse_command(line: &str) -> ParsedLine {
             Some(target) => ParsedLine::Command(ReplCommand::Decompile(target.to_string())),
             None => ParsedLine::InvalidUsage("decompile <addr>"),
         },
-        "explain" => match tokens.next() {
-            Some(target) => ParsedLine::Command(ReplCommand::Explain(target.to_string())),
-            None => ParsedLine::InvalidUsage("explain <addr>"),
-        },
+        "explain" => {
+            let args = std::iter::once("explain")
+                .chain(tokens)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            match ExplainCommand::try_parse_from(args) {
+                Ok(command) => ParsedLine::Command(ReplCommand::Explain(command)),
+                Err(_) => ParsedLine::InvalidUsage(
+                    "explain <addr> [--provider <claude|gpt|auto|ollama>] [--no-fallback]",
+                ),
+            }
+        }
         "rename" => {
-            let Some(target) = tokens.next() else {
-                return ParsedLine::InvalidUsage("rename <addr> <new_name>");
-            };
-
-            let Some(new_name) = tokens.next() else {
-                return ParsedLine::InvalidUsage("rename <addr> <new_name>");
-            };
-
+            let args = std::iter::once("rename")
+                .chain(tokens)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            match RenameCommand::try_parse_from(args) {
+                Ok(command) => ParsedLine::Command(ReplCommand::Rename(command)),
+                Err(_) => ParsedLine::InvalidUsage(
+                    "rename <addr> <new_name> | rename --llm <addr> | rename --all [--provider <claude|gpt|auto|ollama>] [--no-fallback]",
+                ),
+            }
+        }
+        "review" => {
             if tokens.next().is_some() {
-                ParsedLine::InvalidUsage("rename <addr> <new_name>")
+                ParsedLine::InvalidUsage("review")
             } else {
-                ParsedLine::Command(ReplCommand::Rename(target.to_string(), new_name.to_string()))
+                ParsedLine::Command(ReplCommand::Review)
             }
         }
         "comment" => {
@@ -645,7 +1982,10 @@ fn parse_command(line: &str) -> ParsedLine {
             if comment_tokens.is_empty() {
                 ParsedLine::InvalidUsage("comment <addr> <text...>")
             } else {
-                ParsedLine::Command(ReplCommand::Comment(target.to_string(), comment_tokens.join(" ")))
+                ParsedLine::Command(ReplCommand::Comment(
+                    target.to_string(),
+                    comment_tokens.join(" "),
+                ))
             }
         }
         "callgraph" => {
@@ -683,8 +2023,12 @@ fn parse_command(line: &str) -> ParsedLine {
         "info" => ParsedLine::Command(ReplCommand::Info),
         "findings" => ParsedLine::Command(ReplCommand::Findings),
         "cache" => match tokens.next() {
-            Some("stats") if tokens.next().is_none() => ParsedLine::Command(ReplCommand::CacheStats),
-            Some("clear") if tokens.next().is_none() => ParsedLine::Command(ReplCommand::CacheClear),
+            Some("stats") if tokens.next().is_none() => {
+                ParsedLine::Command(ReplCommand::CacheStats)
+            }
+            Some("clear") if tokens.next().is_none() => {
+                ParsedLine::Command(ReplCommand::CacheClear)
+            }
             _ => ParsedLine::InvalidUsage("cache <stats|clear>"),
         },
         "config" => match tokens.next() {
@@ -716,6 +2060,16 @@ fn parse_command(line: &str) -> ParsedLine {
             }
             _ => ParsedLine::InvalidUsage("config <set|get|list> ..."),
         },
+        "show-transcript" => {
+            let args = std::iter::once("show-transcript")
+                .chain(tokens)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            match ShowTranscriptCommand::try_parse_from(args) {
+                Ok(command) => ParsedLine::Command(ReplCommand::ShowTranscript(command)),
+                Err(_) => ParsedLine::InvalidUsage("show-transcript [session_id] [--turn <n>]"),
+            }
+        }
         "quit" | "exit" => ParsedLine::Command(ReplCommand::Quit),
         other => ParsedLine::Unknown(other.to_string()),
     }
@@ -730,7 +2084,10 @@ fn mask_config_value(key: &str, value: &str) -> String {
 }
 
 fn is_api_key(key: &str) -> bool {
-    matches!(key, "anthropic-api-key" | "anthropic_api_key" | "openai-api-key" | "openai_api_key")
+    matches!(
+        key,
+        "anthropic-api-key" | "anthropic_api_key" | "openai-api-key" | "openai_api_key"
+    )
 }
 
 fn create_editor(history_file: &Path) -> Result<Reedline> {
@@ -771,9 +2128,10 @@ fn parse_host_port(value: &str) -> Result<(String, u16)> {
 }
 
 fn save_ida_endpoint(endpoint: &str) -> Result<()> {
-    let path = PathBuf::from(std::env::var_os("HOME").context("HOME environment variable is not set")?)
-        .join(".endeavour")
-        .join("ida_endpoint");
+    let path =
+        PathBuf::from(std::env::var_os("HOME").context("HOME environment variable is not set")?)
+            .join(".endeavour")
+            .join("ida_endpoint");
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -806,8 +2164,11 @@ fn print_help() {
     println!("  connect [host:port]  Connect to IDA MCP (default: localhost:13337)");
     println!("  ida-status           Check IDA connection health");
     println!("  decompile <addr>     Decompile function (0x..., decimal, or sub_...)");
-    println!("  explain <addr>       Analyze function behavior with LLM");
-    println!("  rename <addr> <new_name>  Rename function at address");
+    println!("  explain <addr> [--provider <claude|gpt|auto|ollama>] [--no-fallback]");
+    println!("  rename <addr> <new_name>  Manual rename");
+    println!("  rename --llm <addr> [--provider <claude|gpt|auto|ollama>] [--no-fallback]");
+    println!("  rename --all [--provider <claude|gpt|auto|ollama>] [--no-fallback]");
+    println!("  review               Review queued medium-confidence suggestions");
     println!("  comment <addr> <text...>  Set comment at address");
     println!("  callgraph <addr> [depth]  Show call graph tree (default depth: 3)");
     println!("  search <pattern>     Search strings with regex pattern");
@@ -820,7 +2181,129 @@ fn print_help() {
     println!("  config set <k> <v>   Set config value in ~/.endeavour/config.toml");
     println!("  config get <k>       Get config value (API keys masked)");
     println!("  config list          List config keys and masked values");
+    println!("  show-transcript [session_id] [--turn <n>]  Show stored agentic transcript");
     println!("  quit | exit          Exit the REPL");
+}
+
+fn render_transcript_output(
+    session_id: uuid::Uuid,
+    entries: &[endeavour_core::TranscriptRecord],
+) -> String {
+    let mut lines = Vec::new();
+    let turn_count = entries
+        .iter()
+        .map(|entry| entry.turn_number)
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    let total_tool_calls = entries
+        .iter()
+        .filter_map(|entry| parse_tool_calls(entry.tool_calls_json.as_deref()))
+        .map(|calls| calls.len())
+        .sum::<usize>();
+
+    lines.push(format!("◆ Transcript: {}", session_id));
+    lines.push(fmt::separator(fmt::Separator::Heavy, 78));
+    lines.push(format!("  Rounds       {turn_count}"));
+    lines.push(format!("  Tool calls   {total_tool_calls}"));
+    lines.push(fmt::separator(fmt::Separator::Standard, 78));
+
+    let mut current_turn = 0u32;
+    for entry in entries {
+        if entry.turn_number != current_turn {
+            if current_turn != 0 {
+                lines.push(String::new());
+            }
+            current_turn = entry.turn_number;
+            lines.push(format!("◆ Round {}", entry.turn_number));
+            lines.push(fmt::separator(fmt::Separator::Standard, 78));
+        }
+
+        match entry.role.as_str() {
+            "llm" => {
+                if let Some(message) = parse_transcript_message(&entry.content_json) {
+                    for text_line in message.content.lines() {
+                        lines.push(format!("  {text_line}"));
+                    }
+                }
+                if let Some(tool_calls) = parse_tool_calls(entry.tool_calls_json.as_deref()) {
+                    for tool_call in tool_calls {
+                        lines.push(format!("  ▶ {}", format_tool_call(&tool_call)));
+                    }
+                }
+                if let Some(usage) = parse_usage(entry.usage_json.as_deref()) {
+                    lines.push(format!(
+                        "  usage: input={} output={}",
+                        usage.input_tokens, usage.output_tokens
+                    ));
+                }
+            }
+            "tool_executor" => {
+                if let Some(tool_result) = parse_transcript_tool_result(&entry.content_json) {
+                    if tool_result.is_error {
+                        lines.push(format!("  ◀ ✗ {}", tool_result.content));
+                    } else {
+                        lines.push(format!("  ◀ {}", tool_result.content));
+                    }
+                }
+            }
+            "system" => {
+                if let Some(message) = parse_transcript_message(&entry.content_json) {
+                    lines.push(format!("  [state={}] {}", entry.state, message.content));
+                }
+            }
+            _ => lines.push(format!("  {}", entry.content_json)),
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn parse_transcript_message(content_json: &str) -> Option<Message> {
+    let content = serde_json::from_str::<TranscriptContent>(content_json).ok()?;
+    match content {
+        TranscriptContent::Message(message) => Some(message),
+        TranscriptContent::ToolResult(_) => None,
+    }
+}
+
+fn parse_transcript_tool_result(content_json: &str) -> Option<ToolResult> {
+    let content = serde_json::from_str::<TranscriptContent>(content_json).ok()?;
+    match content {
+        TranscriptContent::ToolResult(result) => Some(result),
+        TranscriptContent::Message(_) => None,
+    }
+}
+
+fn parse_usage(usage_json: Option<&str>) -> Option<Usage> {
+    serde_json::from_str::<Usage>(usage_json?).ok()
+}
+
+fn parse_tool_calls(tool_calls_json: Option<&str>) -> Option<Vec<ToolCall>> {
+    serde_json::from_str::<Vec<ToolCall>>(tool_calls_json?).ok()
+}
+
+fn format_tool_call(tool_call: &ToolCall) -> String {
+    let mut output = tool_call.name.clone();
+    if let serde_json::Value::Object(map) = &tool_call.input {
+        let mut keys = map.keys().cloned().collect::<Vec<_>>();
+        keys.sort();
+        for key in keys {
+            if let Some(value) = map.get(&key) {
+                output.push_str("  ");
+                output.push_str(&key);
+                output.push('=');
+                output.push_str(&format_tool_arg_value(value));
+            }
+        }
+    }
+    output
+}
+
+fn format_tool_arg_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => format!("\"{text}\""),
+        _ => value.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -833,7 +2316,11 @@ fn render_decompile_output(runtime: &Runtime, client: &IdaClient, target: &str) 
 
 fn render_decompile_result(function_name: &str, result: &DecompileResult) -> String {
     let mut lines = vec![
-        fmt::h2(format!("{} @ {}", function_name, fmt::format_addr(result.address))),
+        fmt::h2(format!(
+            "{} @ {}",
+            function_name,
+            fmt::format_addr(result.address)
+        )),
         fmt::separator(fmt::Separator::Standard, 88),
     ];
 
@@ -848,7 +2335,7 @@ fn render_decompile_result(function_name: &str, result: &DecompileResult) -> Str
     lines.join("\n")
 }
 
-fn build_explain_request(config: &Config, function_name: &str, result: &DecompileResult) -> CompletionRequest {
+fn build_explain_request(function_name: &str, result: &DecompileResult) -> CompletionRequest {
     let system_prompt = "You are an expert reverse engineer analyzing decompiled code. Explain what this function does, identify key behaviors, potential vulnerabilities, and suggest meaningful names for the function and its variables.";
     let user_prompt = format!(
         "Analyze function {function_name} at {address}.\n\nDecompiled pseudocode:\n```c\n{pseudocode}\n```",
@@ -857,41 +2344,31 @@ fn build_explain_request(config: &Config, function_name: &str, result: &Decompil
     );
 
     CompletionRequest {
-        model: default_explain_model(config).to_string(),
+        model: "claude-sonnet-4-5".to_string(),
         messages: vec![
             Message {
                 role: Role::System,
                 content: system_prompt.to_string(),
+                tool_results: Vec::new(),
             },
             Message {
                 role: Role::User,
                 content: user_prompt,
+                tool_results: Vec::new(),
             },
         ],
         max_tokens: Some(1_200),
         temperature: Some(0.1),
+        tools: Vec::new(),
     }
 }
 
-fn default_explain_model(config: &Config) -> &'static str {
-    match config.default_provider.as_deref() {
-        Some("openai") => "gpt-4o-mini",
-        Some("anthropic") => "claude-3-5-sonnet-20241022",
-        _ if config.anthropic_api_key.is_some() => "claude-3-5-sonnet-20241022",
-        _ => "gpt-4o-mini",
-    }
-}
-
-fn complete_explain_request(
-    runtime: &Runtime,
-    provider: &dyn LlmProvider,
-    request: CompletionRequest,
-) -> std::result::Result<CompletionResponse, LlmError> {
-    runtime.block_on(provider.complete(request))
-}
-
-fn render_explain_result(function_name: &str, address: u64, analysis: &str) -> String {
-    let title = format!("Function Analysis: {function_name} @ {}", fmt::format_addr(address));
+fn render_explain_result(function_name: &str, address: u64, model: &str, analysis: &str) -> String {
+    let title = format!(
+        "Function Analysis: {function_name} @ {}",
+        fmt::format_addr(address)
+    );
+    let model_line = format!("Model: {model}");
     let body = if analysis.trim().is_empty() {
         "(No analysis text returned.)"
     } else {
@@ -900,6 +2377,7 @@ fn render_explain_result(function_name: &str, address: u64, analysis: &str) -> S
 
     [
         fmt::h2(title),
+        model_line,
         fmt::separator(fmt::Separator::Standard, 88),
         body.to_string(),
         fmt::separator(fmt::Separator::Standard, 88),
@@ -907,11 +2385,21 @@ fn render_explain_result(function_name: &str, address: u64, analysis: &str) -> S
     .join("\n")
 }
 
-fn render_callgraph_output(runtime: &Runtime, client: &IdaClient, target: &str, depth: u32) -> Result<String> {
+fn render_callgraph_output(
+    runtime: &Runtime,
+    client: &IdaClient,
+    target: &str,
+    depth: u32,
+) -> Result<String> {
     let (root_addr, root_name) = resolve_target_address(runtime, client, target)?;
     let edges = runtime
         .block_on(client.call_graph(root_addr, Some(depth)))
-        .with_context(|| format!("failed to fetch call graph for {}", fmt::format_addr(root_addr)))?;
+        .with_context(|| {
+            format!(
+                "failed to fetch call graph for {}",
+                fmt::format_addr(root_addr)
+            )
+        })?;
 
     let mut adjacency: HashMap<u64, Vec<u64>> = HashMap::new();
     let mut node_order = Vec::new();
@@ -951,7 +2439,10 @@ fn render_callgraph_output(runtime: &Runtime, client: &IdaClient, target: &str, 
         root_name,
         fmt::format_addr(root_addr)
     );
-    let mut lines = vec![header.clone(), fmt::separator(fmt::Separator::Standard, header.chars().count())];
+    let mut lines = vec![
+        header.clone(),
+        fmt::separator(fmt::Separator::Standard, header.chars().count()),
+    ];
 
     let children = adjacency.get(&root_addr).cloned().unwrap_or_default();
     if children.is_empty() {
@@ -999,7 +2490,10 @@ fn render_callgraph_branch(
             continue;
         }
 
-        lines.push(format!("{prefix}{branch}{name} @ {}", fmt::format_addr(*child)));
+        lines.push(format!(
+            "{prefix}{branch}{name} @ {}",
+            fmt::format_addr(*child)
+        ));
 
         let mut next_ancestors = ancestors.clone();
         next_ancestors.insert(*child);
@@ -1023,7 +2517,11 @@ fn render_callgraph_branch(
     }
 }
 
-fn resolve_target_address(runtime: &Runtime, client: &IdaClient, target: &str) -> Result<(u64, String)> {
+fn resolve_target_address(
+    runtime: &Runtime,
+    client: &IdaClient,
+    target: &str,
+) -> Result<(u64, String)> {
     if let Some(address) = parse_decompile_target(target) {
         let query = fmt::format_addr(address);
         let name = runtime
@@ -1056,7 +2554,10 @@ fn is_target_not_found_error(target: &str, err: &anyhow::Error) -> bool {
 
 fn parse_decompile_target(raw: &str) -> Option<u64> {
     let input = raw.trim();
-    if let Some(hex) = input.strip_prefix("0x").or_else(|| input.strip_prefix("0X")) {
+    if let Some(hex) = input
+        .strip_prefix("0x")
+        .or_else(|| input.strip_prefix("0X"))
+    {
         return u64::from_str_radix(hex, 16).ok();
     }
 
@@ -1069,20 +2570,6 @@ fn parse_decompile_target(raw: &str) -> Option<u64> {
     }
 
     None
-}
-
-fn has_llm_api_key(config: &Config) -> bool {
-    config.anthropic_api_key.is_some() || config.openai_api_key.is_some()
-}
-
-fn explain_api_key_hint(config: &Config) -> String {
-    match config.default_provider.as_deref() {
-        Some("anthropic") => "config set anthropic_api_key <key>".to_string(),
-        Some("openai") => "config set openai_api_key <key>".to_string(),
-        _ => {
-            "config set anthropic_api_key <key> or config set openai_api_key <key>".to_string()
-        }
-    }
 }
 
 fn is_missing_function_error(error: &IdaError) -> bool {
@@ -1111,7 +2598,11 @@ fn format_llm_error(error: &LlmError) -> String {
     }
 }
 
-fn fetch_search_results(runtime: &Runtime, client: &IdaClient, pattern: &str) -> Result<Vec<(u64, String)>> {
+fn fetch_search_results(
+    runtime: &Runtime,
+    client: &IdaClient,
+    pattern: &str,
+) -> Result<Vec<(u64, String)>> {
     runtime
         .block_on(client.find_strings(pattern))
         .with_context(|| format!("failed to search strings for pattern '{pattern}'"))
@@ -1123,7 +2614,12 @@ fn rename_symbol(runtime: &Runtime, client: &IdaClient, addr: u64, new_name: &st
         .with_context(|| format!("failed to rename function at {}", fmt::format_addr(addr)))
 }
 
-fn set_symbol_comment(runtime: &Runtime, client: &IdaClient, addr: u64, comment: &str) -> Result<()> {
+fn set_symbol_comment(
+    runtime: &Runtime,
+    client: &IdaClient,
+    addr: u64,
+    comment: &str,
+) -> Result<()> {
     runtime
         .block_on(client.set_comment(addr, comment))
         .with_context(|| format!("failed to set comment at {}", fmt::format_addr(addr)))
@@ -1145,21 +2641,23 @@ fn render_search_output(matches: &[(u64, String)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_explain_request, complete_explain_request, connect_with_transport,
-        explain_api_key_hint, fetch_search_results, format_resolve_target_error,
-        is_missing_function_error, parse_command, parse_decompile_target, rename_symbol,
+        build_explain_request, build_suggestions, classify_confidence, connect_with_transport,
+        fetch_search_results, format_resolve_target_error, is_missing_function_error,
+        parse_command, parse_decompile_target, parse_rename_json_payload, rename_symbol,
         render_callgraph_output, render_decompile_output, render_explain_result,
-        render_search_output, resolve_target_address, set_symbol_comment, ParsedLine,
-        ReplCommand,
+        render_search_output, render_transcript_output, resolve_target_address, set_symbol_comment,
+        CommentPayload, ConfidenceTier, ExplainCommand, FunctionRenamePayload, ParsedLine,
+        RenameCommand, RenameLlmResponse, ReplCommand, ShowTranscriptCommand,
+        VariableRenamePayload,
     };
+    use endeavour_core::store::SessionStore;
+    use endeavour_core::TranscriptRecord;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
-    use endeavour_core::config::Config;
     use endeavour_ida::{DecompileResult, IdaClient, IdaError, Transport};
-    use endeavour_llm::mock::{MockProvider, MockResponse};
-    use endeavour_llm::CompletionResponse;
+    use endeavour_llm::{CompletionResponse, StopReason};
     use serde_json::{json, Value};
     use tokio::runtime::Runtime;
 
@@ -1187,7 +2685,11 @@ mod tests {
         );
         assert_eq!(
             parse_command("explain 0x401000"),
-            ParsedLine::Command(ReplCommand::Explain("0x401000".to_string()))
+            ParsedLine::Command(ReplCommand::Explain(ExplainCommand {
+                target: "0x401000".to_string(),
+                provider: "auto".to_string(),
+                no_fallback: false,
+            }))
         );
         assert_eq!(
             parse_command("search objc_msgSend"),
@@ -1203,7 +2705,14 @@ mod tests {
         );
         assert_eq!(
             parse_command("rename 0x401000 main"),
-            ParsedLine::Command(ReplCommand::Rename("0x401000".to_string(), "main".to_string()))
+            ParsedLine::Command(ReplCommand::Rename(RenameCommand {
+                target: Some("0x401000".to_string()),
+                new_name: Some("main".to_string()),
+                llm: false,
+                all: false,
+                provider: "auto".to_string(),
+                no_fallback: false,
+            }))
         );
         assert_eq!(
             parse_command("comment 0x401000 this is a note"),
@@ -1218,12 +2727,103 @@ mod tests {
     fn parse_rename_and_comment_usage_errors() {
         assert_eq!(
             parse_command("rename 0x401000"),
-            ParsedLine::InvalidUsage("rename <addr> <new_name>")
+            ParsedLine::Command(ReplCommand::Rename(RenameCommand {
+                target: Some("0x401000".to_string()),
+                new_name: None,
+                llm: false,
+                all: false,
+                provider: "auto".to_string(),
+                no_fallback: false,
+            }))
         );
         assert_eq!(
             parse_command("comment 0x401000"),
             ParsedLine::InvalidUsage("comment <addr> <text...>")
         );
+
+        assert_eq!(
+            parse_command("rename --all"),
+            ParsedLine::Command(ReplCommand::Rename(RenameCommand {
+                target: None,
+                new_name: None,
+                llm: false,
+                all: true,
+                provider: "auto".to_string(),
+                no_fallback: false,
+            }))
+        );
+        assert_eq!(
+            parse_command("review"),
+            ParsedLine::Command(ReplCommand::Review)
+        );
+    }
+
+    #[test]
+    fn parse_rename_json_handles_schema_and_malformed_payloads() {
+        let valid = r#"{
+            "function_rename": {"proposed_name": "aes_init", "confidence": 0.94},
+            "variable_renames": [{"current_name": "a1", "proposed_name": "src", "confidence": 0.83}],
+            "comments": [{"addr": "0x401000", "text": "entry", "confidence": 0.77}]
+        }"#;
+        assert!(parse_rename_json_payload(valid).is_ok());
+
+        let malformed = "```json {\"function_rename\":{}} ```";
+        assert!(parse_rename_json_payload(malformed).is_err());
+
+        let wrong_keys = r#"{"function_rename":{},"variable_renames":[],"extra":[]}"#;
+        assert!(parse_rename_json_payload(wrong_keys).is_err());
+    }
+
+    #[test]
+    fn build_suggestions_validates_entries_and_confidence_tiers() {
+        let temp = tempfile::tempdir();
+        assert!(temp.is_ok());
+        let temp = temp.unwrap_or_else(|_| unreachable!());
+        let store = SessionStore::open(&temp.path().join("rename-suggestions.db"));
+        assert!(store.is_ok());
+        let store = store.unwrap_or_else(|_| unreachable!());
+        let session = store.create_session("test", uuid::Uuid::new_v4());
+        assert!(session.is_ok());
+        let session = session.unwrap_or_else(|_| unreachable!());
+
+        let response = RenameLlmResponse {
+            function_rename: FunctionRenamePayload {
+                proposed_name: Some("aes_key_schedule_128".to_string()),
+                confidence: 0.94,
+            },
+            variable_renames: vec![
+                VariableRenamePayload {
+                    current_name: "a1".to_string(),
+                    proposed_name: "key_input".to_string(),
+                    confidence: 0.93,
+                },
+                VariableRenamePayload {
+                    current_name: "v3".to_string(),
+                    proposed_name: "123invalid".to_string(),
+                    confidence: 0.61,
+                },
+            ],
+            comments: vec![
+                CommentPayload {
+                    addr: "0x401020".to_string(),
+                    text: "entry point".to_string(),
+                    confidence: 0.88,
+                },
+                CommentPayload {
+                    addr: "BAD".to_string(),
+                    text: "invalid".to_string(),
+                    confidence: 0.55,
+                },
+            ],
+        };
+
+        let suggestions = build_suggestions(0x401000, "sub_401000", response, &store, session.id);
+        assert!(suggestions.is_ok());
+        let suggestions = suggestions.unwrap_or_else(|_| unreachable!());
+        assert_eq!(suggestions.len(), 3);
+        assert!(matches!(classify_confidence(0.70), ConfidenceTier::Tier1));
+        assert!(matches!(classify_confidence(0.69), ConfidenceTier::Tier2));
+        assert!(matches!(classify_confidence(0.49), ConfidenceTier::Tier3));
     }
 
     #[test]
@@ -1255,6 +2855,67 @@ mod tests {
             parse_command("callgraph 0x401000 5"),
             ParsedLine::Command(ReplCommand::Callgraph("0x401000".to_string(), Some(5)))
         );
+    }
+
+    #[test]
+    fn parse_show_transcript_command_variants() {
+        assert_eq!(
+            parse_command("show-transcript"),
+            ParsedLine::Command(ReplCommand::ShowTranscript(ShowTranscriptCommand {
+                session_id: None,
+                turn: None,
+            }))
+        );
+
+        assert_eq!(
+            parse_command("show-transcript 550e8400-e29b-41d4-a716-446655440000 --turn 2"),
+            ParsedLine::Command(ReplCommand::ShowTranscript(ShowTranscriptCommand {
+                session_id: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+                turn: Some(2),
+            }))
+        );
+    }
+
+    #[test]
+    fn transcript_output_includes_rounds_tool_calls_and_results() {
+        let session_id = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000");
+        assert!(session_id.is_ok());
+        let session_id = match session_id {
+            Ok(value) => value,
+            Err(err) => panic!("unexpected parse failure: {err}"),
+        };
+
+        let entries = vec![
+            TranscriptRecord {
+                id: uuid::Uuid::new_v4(),
+                session_id,
+                turn_number: 1,
+                role: "llm".to_string(),
+                timestamp: "1700000000".to_string(),
+                content_json: "{\"kind\":\"message\",\"value\":{\"role\":\"assistant\",\"content\":\"Looking up the function\",\"tool_results\":[]}}".to_string(),
+                usage_json: Some("{\"input_tokens\":12,\"output_tokens\":4}".to_string()),
+                state: "llm_streaming".to_string(),
+                tool_calls_json: Some("[{\"id\":\"tc1\",\"name\":\"decompile\",\"input\":{\"addr\":\"0x401000\"}}]".to_string()),
+            },
+            TranscriptRecord {
+                id: uuid::Uuid::new_v4(),
+                session_id,
+                turn_number: 1,
+                role: "tool_executor".to_string(),
+                timestamp: "1700000001".to_string(),
+                content_json: "{\"kind\":\"tool_result\",\"value\":{\"tool_use_id\":\"tc1\",\"content\":\"142 bytes of pseudocode returned\",\"output\":null,\"display_summary\":null,\"is_error\":false}}".to_string(),
+                usage_json: None,
+                state: "execute_tools".to_string(),
+                tool_calls_json: None,
+            },
+        ];
+
+        let rendered = render_transcript_output(session_id, &entries);
+        assert!(rendered.contains("◆ Transcript:"));
+        assert!(rendered.contains("◆ Round 1"));
+        assert!(rendered.contains("▶ decompile  addr=\"0x401000\""));
+        assert!(rendered.contains("◀ 142 bytes of pseudocode returned"));
+        assert!(rendered.contains("usage: input=12 output=4"));
     }
 
     #[test]
@@ -1292,7 +2953,11 @@ mod tests {
 
     #[async_trait]
     impl Transport for MockTransport {
-        async fn call(&self, method: &str, params: Value) -> Result<Value, endeavour_ida::IdaError> {
+        async fn call(
+            &self,
+            method: &str,
+            params: Value,
+        ) -> Result<Value, endeavour_ida::IdaError> {
             if let Ok(mut calls) = self.calls.lock() {
                 calls.push((method.to_string(), params));
             }
@@ -1492,7 +3157,10 @@ mod tests {
         assert_eq!(methods.first().map(String::as_str), Some("lookup_funcs"));
         assert_eq!(methods.get(1).map(String::as_str), Some("callgraph"));
         assert_eq!(
-            methods.iter().filter(|method| method.as_str() == "lookup_funcs").count(),
+            methods
+                .iter()
+                .filter(|method| method.as_str() == "lookup_funcs")
+                .count(),
             4
         );
     }
@@ -1506,7 +3174,9 @@ mod tests {
             Err(err) => panic!("failed to create runtime: {err}"),
         };
 
-        let mock = Arc::new(MockTransport::new(vec![Ok(json!({"func": [{"ok": true}]}))]));
+        let mock = Arc::new(MockTransport::new(vec![Ok(
+            json!({"func": [{"ok": true}]}),
+        )]));
         let client = IdaClient::with_transport("127.0.0.1", 13337, mock.clone());
 
         let renamed = rename_symbol(&runtime, &client, 0x401000, "main");
@@ -1532,66 +3202,30 @@ mod tests {
     }
 
     #[test]
-    fn explain_flow_uses_mock_provider_and_renders_output() {
-        let runtime = Runtime::new();
-        assert!(runtime.is_ok());
-        let runtime = match runtime {
-            Ok(value) => value,
-            Err(err) => panic!("failed to create runtime: {err}"),
-        };
-
-        let provider = MockProvider::new(vec![MockResponse::Completion(Ok(CompletionResponse {
-            model: "test-model".to_string(),
-            content: "This function parses a header, validates bounds, and dispatches by opcode. Suggested name: parse_packet.".to_string(),
-            stop_reason: Some("stop".to_string()),
-            input_tokens: Some(100),
-            output_tokens: Some(32),
-        }))]);
-
-        let config = Config {
-            anthropic_api_key: Some("sk-ant-test".to_string()),
-            openai_api_key: None,
-            default_provider: Some("anthropic".to_string()),
-        };
-
+    fn explain_flow_builds_prompt_and_renders_output() {
         let decompile = DecompileResult {
             address: 0x401000,
             pseudocode: "int parse(unsigned char *buf, int len) {\n  if (len < 4) return -1;\n  return buf[0];\n}".to_string(),
         };
 
-        let request = build_explain_request(&config, "sub_401000", &decompile);
-        let response = complete_explain_request(&runtime, &provider, request);
-        assert!(response.is_ok());
-        let response = match response {
-            Ok(value) => value,
-            Err(err) => panic!("unexpected llm error: {err}"),
+        let request = build_explain_request("sub_401000", &decompile);
+        assert_eq!(request.model, "claude-sonnet-4-5");
+
+        let response = CompletionResponse {
+            model: "test-model".to_string(),
+            content: "This function parses a header, validates bounds, and dispatches by opcode. Suggested name: parse_packet.".to_string(),
+            stop_reason: Some(StopReason::EndTurn),
+            input_tokens: Some(100),
+            output_tokens: Some(32),
+            tool_calls: Vec::new(),
         };
         assert!(response.content.contains("Suggested name"));
 
-        let rendered = render_explain_result("sub_401000", 0x401000, &response.content);
+        let rendered =
+            render_explain_result("sub_401000", 0x401000, &response.model, &response.content);
         assert!(rendered.contains("Function Analysis: sub_401000 @ 0x00401000"));
+        assert!(rendered.contains("Model: test-model"));
         assert!(rendered.contains("parses a header"));
-    }
-
-    #[test]
-    fn explain_api_key_hint_uses_default_provider() {
-        let config = Config {
-            anthropic_api_key: None,
-            openai_api_key: None,
-            default_provider: Some("openai".to_string()),
-        };
-
-        assert_eq!(explain_api_key_hint(&config), "config set openai_api_key <key>");
-    }
-
-    #[test]
-    fn explain_api_key_hint_without_default_provider_lists_both() {
-        let config = Config::default();
-
-        assert_eq!(
-            explain_api_key_hint(&config),
-            "config set anthropic_api_key <key> or config set openai_api_key <key>"
-        );
     }
 
     #[test]
