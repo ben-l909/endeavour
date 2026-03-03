@@ -12,3 +12,10 @@ rusqlite.workspace = true
 uuid.workspace = true
 goblin.workspace = true
 memmap2 = "0.9"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+tempfile = "3"

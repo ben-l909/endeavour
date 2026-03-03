@@ -8,3 +8,6 @@ license.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 uuid.workspace = true
+
+[lints]
+workspace = true

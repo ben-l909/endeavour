@@ -645,7 +645,7 @@ fn parse_hex_bytes(text: &str) -> Result<Vec<u8>> {
             .trim_start_matches("0x")
             .trim_start_matches("0X")
             .to_string();
-        if dense.len() % 2 != 0 {
+        if !dense.len().is_multiple_of(2) {
             return Err(IdaError::DeserializationError("Invalid hex byte string length".to_string()));
         }
         dense
