@@ -4,14 +4,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use endeavour_cli::{auth, fmt};
 use endeavour_core::store::SessionStore;
 use endeavour_ida::IdaClient;
 use tracing::info;
 use uuid::Uuid;
 
-/// Authentication support modules.
-pub mod auth;
-pub mod fmt;
+mod commands;
 mod repl;
 
 /// Endeavour Labs analysis CLI.
