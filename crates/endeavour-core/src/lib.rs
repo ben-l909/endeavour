@@ -4,7 +4,6 @@
 //! for the Endeavour reverse engineering toolkit.
 
 /// Configuration management for Endeavour.
-
 pub mod config;
 /// Core error types.
 pub mod error;
