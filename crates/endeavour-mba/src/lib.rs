@@ -12,11 +12,16 @@ pub mod simplify;
 #[cfg(feature = "z3-verifier")]
 pub mod verifier;
 
+/// Re-export of the expression AST type.
 pub use ast::Expr;
+/// Re-export of error types.
 pub use error::{Error, Result};
+/// Re-export of MBA matching types.
 pub use matcher::{MbaMatch, MbaMatcher};
+/// Re-export of the simplification function.
 pub use simplify::simplify;
 #[cfg(feature = "z3-verifier")]
+/// Re-export of Z3 verifier types.
 pub use verifier::{VerifierResult, Z3Verifier};
 
 /// Returns the crate name.

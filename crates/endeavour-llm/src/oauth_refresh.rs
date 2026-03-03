@@ -247,14 +247,14 @@ fn write_auth_store(store: &AuthStore) -> std::io::Result<()> {
     let mut payload = serde_json::to_vec_pretty(store).map_err(std::io::Error::other)?;
     payload.push(b'\n');
     std::fs::write(&path, payload)?;
-    
+
     // Enforce 0600 permissions on the auth store file
     #[cfg(unix)]
     {
         let permissions = std::fs::Permissions::from_mode(0o600);
         std::fs::set_permissions(&path, permissions)?;
     }
-    
+
     Ok(())
 }
 

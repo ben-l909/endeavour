@@ -229,15 +229,15 @@ fn lift_arm64_ubfm(state: &mut LiftState, operands: &[&str]) -> Option<Stmt> {
     if operands.len() != 4 {
         return None;
     }
-    
+
     let dst_reg = normalize_reg(operands[0])?;
     let width = arm64_reg_width(&dst_reg)?;
     let src = parse_arm64_operand(state, operands[1], width)?;
     let _imm_r = parse_immediate(operands[2].trim())?;
     let imm_s = parse_immediate(operands[3].trim())?;
-    
+
     let dst = state.write_reg(&dst_reg);
-    
+
     // Determine if this is LSL or LSR based on immediate values
     // If s == 63: it's LSR
     // If s < 63: it's LSL
@@ -249,7 +249,7 @@ fn lift_arm64_ubfm(state: &mut LiftState, operands: &[&str]) -> Option<Stmt> {
         // Not a simple shift
         return None;
     };
-    
+
     Some(Stmt::Assign {
         dst,
         expr: Expr::Binary {
@@ -267,15 +267,15 @@ fn lift_arm64_sbfm(state: &mut LiftState, operands: &[&str]) -> Option<Stmt> {
     if operands.len() != 4 {
         return None;
     }
-    
+
     let dst_reg = normalize_reg(operands[0])?;
     let width = arm64_reg_width(&dst_reg)?;
     let src = parse_arm64_operand(state, operands[1], width)?;
     let _imm_r = parse_immediate(operands[2].trim())?;
     let _imm_s = parse_immediate(operands[3].trim())?;
-    
+
     let dst = state.write_reg(&dst_reg);
-    
+
     Some(Stmt::Assign {
         dst,
         expr: Expr::Binary {
@@ -596,8 +596,6 @@ mod tests {
         assert_eq!(stmts.len(), 1);
         assert_binary_stmt(&stmts[0], BinOp::Shl);
     }
-
-
 
     #[test]
     fn lifts_arm64_unary_operations() {

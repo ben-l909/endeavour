@@ -1,6 +1,13 @@
 use crate::error::Result;
 use crate::ir::MicrocodeProgram;
 
+/// Parses a JSON string into a MicrocodeProgram.
+///
+/// # Arguments
+/// * `input` - A JSON string representing a microcode program
+///
+/// # Returns
+/// A Result containing the parsed MicrocodeProgram or an error
 pub fn parse_microcode_json(input: &str) -> Result<MicrocodeProgram> {
     serde_json::from_str(input).map_err(Into::into)
 }

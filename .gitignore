@@ -4,3 +4,4 @@ target/
 *.swp
 *.swo
 *~
+.z3-trace
