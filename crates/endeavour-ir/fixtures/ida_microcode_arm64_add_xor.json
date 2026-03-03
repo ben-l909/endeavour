@@ -1,0 +1,111 @@
+{
+  "function": {
+    "name": "sub_100003F20",
+    "entry_ea": "0x100003f20",
+    "arch": "arm64",
+    "mba_qty": 6
+  },
+  "maturity": "MMAT_GENERATED",
+  "blocks": [
+    {
+      "id": 0,
+      "start_ea": "0x100003f20",
+      "end_ea": "0x100003f34",
+      "preds": [],
+      "succs": [1],
+      "instructions": [
+        {
+          "ea": "0x100003f20",
+          "opcode": "assign",
+          "dst": {
+            "id": "v0",
+            "name": "x8",
+            "width": 64,
+            "storage": "register"
+          },
+          "args": [
+            {
+              "kind": "binary",
+              "op": "add",
+              "lhs": {
+                "kind": "var",
+                "var": {
+                  "id": "a0",
+                  "name": "x0",
+                  "width": 64,
+                  "storage": "register"
+                }
+              },
+              "rhs": {
+                "kind": "const",
+                "constant": {
+                  "value": 16,
+                  "width": 64
+                }
+              }
+            }
+          ],
+          "comment": "x8 = x0 + 0x10"
+        },
+        {
+          "ea": "0x100003f24",
+          "opcode": "assign",
+          "dst": {
+            "id": "v1",
+            "name": "x9",
+            "width": 64,
+            "storage": "register"
+          },
+          "args": [
+            {
+              "kind": "binary",
+              "op": "xor",
+              "lhs": {
+                "kind": "var",
+                "var": {
+                  "id": "v0",
+                  "name": "x8",
+                  "width": 64,
+                  "storage": "register"
+                }
+              },
+              "rhs": {
+                "kind": "const",
+                "constant": {
+                  "value": 255,
+                  "width": 64
+                }
+              }
+            }
+          ],
+          "comment": "x9 = x8 ^ 0xff"
+        },
+        {
+          "ea": "0x100003f2c",
+          "opcode": "return",
+          "dst": null,
+          "args": [
+            {
+              "kind": "var",
+              "var": {
+                "id": "v1",
+                "name": "x9",
+                "width": 64,
+                "storage": "register"
+              }
+            }
+          ],
+          "comment": null
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "start_ea": "0x100003f34",
+      "end_ea": "0x100003f34",
+      "preds": [0],
+      "succs": [],
+      "instructions": []
+    }
+  ]
+}

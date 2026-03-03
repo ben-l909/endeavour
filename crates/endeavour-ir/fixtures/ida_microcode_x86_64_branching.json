@@ -1,0 +1,200 @@
+{
+  "function": {
+    "name": "sub_140001040",
+    "entry_ea": "0x140001040",
+    "arch": "x86_64",
+    "mba_qty": 4
+  },
+  "maturity": "MMAT_PREOPTIMIZED",
+  "blocks": [
+    {
+      "id": 0,
+      "start_ea": "0x140001040",
+      "end_ea": "0x140001055",
+      "preds": [],
+      "succs": [1, 2],
+      "instructions": [
+        {
+          "ea": "0x140001043",
+          "opcode": "assign",
+          "dst": {
+            "id": "t0",
+            "name": "tmp0",
+            "width": 64,
+            "storage": "temp"
+          },
+          "args": [
+            {
+              "kind": "load",
+              "addr": {
+                "kind": "binary",
+                "op": "add",
+                "lhs": {
+                  "kind": "var",
+                  "var": {
+                    "id": "a0",
+                    "name": "rcx",
+                    "width": 64,
+                    "storage": "register"
+                  }
+                },
+                "rhs": {
+                  "kind": "const",
+                  "constant": {
+                    "value": 8,
+                    "width": 64
+                  }
+                }
+              },
+              "width": 64
+            }
+          ],
+          "comment": "tmp0 = [rcx + 8]"
+        },
+        {
+          "ea": "0x140001049",
+          "opcode": "jump_cond",
+          "dst": null,
+          "args": [
+            {
+              "kind": "binary",
+              "op": "eq",
+              "lhs": {
+                "kind": "slice",
+                "src": {
+                  "kind": "var",
+                  "var": {
+                    "id": "t0",
+                    "name": "tmp0",
+                    "width": 64,
+                    "storage": "temp"
+                  }
+                },
+                "lo": 0,
+                "hi": 0
+              },
+              "rhs": {
+                "kind": "const",
+                "constant": {
+                  "value": 0,
+                  "width": 1
+                }
+              }
+            }
+          ],
+          "comment": "if ((tmp0 & 1) == 0) goto block_2"
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "start_ea": "0x140001055",
+      "end_ea": "0x14000105c",
+      "preds": [0],
+      "succs": [3],
+      "instructions": [
+        {
+          "ea": "0x140001055",
+          "opcode": "assign",
+          "dst": {
+            "id": "v1",
+            "name": "rax",
+            "width": 64,
+            "storage": "register"
+          },
+          "args": [
+            {
+              "kind": "binary",
+              "op": "sub",
+              "lhs": {
+                "kind": "var",
+                "var": {
+                  "id": "t0",
+                  "name": "tmp0",
+                  "width": 64,
+                  "storage": "temp"
+                }
+              },
+              "rhs": {
+                "kind": "const",
+                "constant": {
+                  "value": 1,
+                  "width": 64
+                }
+              }
+            }
+          ],
+          "comment": null
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "start_ea": "0x140001060",
+      "end_ea": "0x140001067",
+      "preds": [0],
+      "succs": [3],
+      "instructions": [
+        {
+          "ea": "0x140001060",
+          "opcode": "assign",
+          "dst": {
+            "id": "v2",
+            "name": "rax",
+            "width": 64,
+            "storage": "register"
+          },
+          "args": [
+            {
+              "kind": "binary",
+              "op": "add",
+              "lhs": {
+                "kind": "var",
+                "var": {
+                  "id": "t0",
+                  "name": "tmp0",
+                  "width": 64,
+                  "storage": "temp"
+                }
+              },
+              "rhs": {
+                "kind": "const",
+                "constant": {
+                  "value": 1,
+                  "width": 64
+                }
+              }
+            }
+          ],
+          "comment": null
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "start_ea": "0x14000106c",
+      "end_ea": "0x140001070",
+      "preds": [1, 2],
+      "succs": [],
+      "instructions": [
+        {
+          "ea": "0x14000106c",
+          "opcode": "return",
+          "dst": null,
+          "args": [
+            {
+              "kind": "var",
+              "var": {
+                "id": "ret",
+                "name": "rax",
+                "width": 64,
+                "storage": "register"
+              }
+            }
+          ],
+          "comment": null
+        }
+      ]
+    }
+  ]
+}
