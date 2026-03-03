@@ -46,7 +46,7 @@ fn build_binary(macho: &MachO<'_>, path: PathBuf) -> Result<Binary> {
 
     let mut segments_out = Vec::new();
     let mut section_names = Vec::new();
-    let mut objc_sections = Vec::new();
+    let mut section_data = Vec::new();
 
     for segment in &macho.segments {
         let segment_name = segment
@@ -56,16 +56,19 @@ fn build_binary(macho: &MachO<'_>, path: PathBuf) -> Result<Binary> {
 
         let mut sections_out = Vec::new();
         for section in segment {
-            let (section, section_data) = section.map_err(|e| Error::ParseError(e.to_string()))?;
+            let (section, raw_section_data) =
+                section.map_err(|e| Error::ParseError(e.to_string()))?;
             let section_name = section
                 .name()
                 .map_err(|e| Error::ParseError(e.to_string()))?
                 .to_string();
 
             section_names.push(section_name.clone());
-            if section_name.starts_with("__objc") {
-                objc_sections.push((section_name.clone(), section_data.to_vec()));
-            }
+            section_data.push(MachoSectionData {
+                name: section_name.clone(),
+                addr: section.addr,
+                data: raw_section_data.to_vec(),
+            });
 
             sections_out.push(Section {
                 name: section_name,
@@ -102,7 +105,7 @@ fn build_binary(macho: &MachO<'_>, path: PathBuf) -> Result<Binary> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let objc_metadata = extract_objc_metadata(&objc_sections);
+    let objc_metadata = extract_objc_metadata(&section_data);
 
     Ok(Binary {
         uuid,
@@ -112,6 +115,13 @@ fn build_binary(macho: &MachO<'_>, path: PathBuf) -> Result<Binary> {
         symbols,
         objc_metadata,
     })
+}
+
+#[derive(Debug, Clone)]
+struct MachoSectionData {
+    name: String,
+    addr: u64,
+    data: Vec<u8>,
 }
 
 fn select_fat_index(fat: &goblin::mach::MultiArch<'_>) -> Result<usize> {
@@ -213,24 +223,33 @@ fn is_data_symbol(nlist: &symbols::Nlist, section_name: Option<&str>) -> bool {
     )
 }
 
-fn extract_objc_metadata(objc_sections: &[(String, Vec<u8>)]) -> Option<ObjCInfo> {
+fn extract_objc_metadata(section_data: &[MachoSectionData]) -> Option<ObjCInfo> {
     let mut class_names = BTreeSet::new();
     let mut method_names = BTreeSet::new();
     let mut protocols = BTreeSet::new();
     let mut categories = BTreeSet::new();
+    let pointer_size = std::mem::size_of::<u64>();
 
-    for (section_name, data) in objc_sections {
-        let strings = extract_cstrings(data, 2);
-
-        if section_name.contains("classname") || section_name.contains("class") {
-            for value in &strings {
-                if looks_like_objc_identifier(value) {
-                    class_names.insert(value.clone());
-                }
+    if let Some(classlist_section) = section_data
+        .iter()
+        .find(|section| section.name == "__objc_classlist")
+    {
+        for class_ptr in classlist_section
+            .data
+            .chunks_exact(pointer_size)
+            .filter_map(read_le_u64)
+            .filter(|addr| *addr != 0)
+        {
+            if let Some(class_name) = extract_objc_class_name(class_ptr, section_data) {
+                class_names.insert(class_name);
             }
         }
+    }
 
-        if section_name.contains("meth") {
+    for section in section_data {
+        let strings = extract_cstrings(&section.data, 2);
+
+        if section.name.starts_with("__objc_meth") {
             for value in &strings {
                 if looks_like_method_name(value) {
                     method_names.insert(value.clone());
@@ -238,7 +257,15 @@ fn extract_objc_metadata(objc_sections: &[(String, Vec<u8>)]) -> Option<ObjCInfo
             }
         }
 
-        if section_name.contains("proto") {
+        if section.name.contains("classname") {
+            for value in &strings {
+                if looks_like_objc_identifier(value) {
+                    class_names.insert(value.clone());
+                }
+            }
+        }
+
+        if section.name.contains("proto") {
             for value in &strings {
                 if looks_like_objc_identifier(value) {
                     protocols.insert(value.clone());
@@ -246,7 +273,7 @@ fn extract_objc_metadata(objc_sections: &[(String, Vec<u8>)]) -> Option<ObjCInfo
             }
         }
 
-        if section_name.contains("cat") {
+        if section.name.contains("cat") {
             for value in &strings {
                 if looks_like_objc_identifier(value) {
                     categories.insert(value.clone());
@@ -290,6 +317,78 @@ fn extract_objc_metadata(objc_sections: &[(String, Vec<u8>)]) -> Option<ObjCInfo
         protocols: protocols.into_iter().collect(),
         categories: categories.into_iter().collect(),
     })
+}
+
+fn extract_objc_class_name(class_addr: u64, section_data: &[MachoSectionData]) -> Option<String> {
+    let pointer_size = std::mem::size_of::<u64>() as u64;
+    let data_bits_addr = class_addr + (pointer_size * 4);
+    let data_bits = read_pointer_at_address(data_bits_addr, section_data)?;
+    let class_ro_addr = data_bits & !0x7;
+    let name_ptr_addr = class_ro_addr + 16 + pointer_size;
+    let name_addr = read_pointer_at_address(name_ptr_addr, section_data)?;
+    let class_name = read_cstring_at_address(name_addr, section_data)?;
+
+    if looks_like_objc_identifier(&class_name) {
+        Some(class_name)
+    } else {
+        None
+    }
+}
+
+fn read_pointer_at_address(addr: u64, section_data: &[MachoSectionData]) -> Option<u64> {
+    let pointer_size = std::mem::size_of::<u64>() as u64;
+    let bytes = read_bytes_at_address(addr, pointer_size, section_data)?;
+    read_le_u64(bytes)
+}
+
+fn read_bytes_at_address(addr: u64, size: u64, section_data: &[MachoSectionData]) -> Option<&[u8]> {
+    for section in section_data {
+        if section.data.is_empty() || addr < section.addr {
+            continue;
+        }
+
+        let start = (addr - section.addr) as usize;
+        let end = start.checked_add(size as usize)?;
+        if end <= section.data.len() {
+            return Some(&section.data[start..end]);
+        }
+    }
+
+    None
+}
+
+fn read_cstring_at_address(addr: u64, section_data: &[MachoSectionData]) -> Option<String> {
+    for section in section_data {
+        if section.data.is_empty() || addr < section.addr {
+            continue;
+        }
+
+        let start = (addr - section.addr) as usize;
+        if start >= section.data.len() {
+            continue;
+        }
+
+        let bytes = &section.data[start..];
+        let end = bytes.iter().position(|byte| *byte == 0)?;
+        let text = std::str::from_utf8(&bytes[..end]).ok()?.trim();
+        if text.is_empty() {
+            return None;
+        }
+
+        return Some(text.to_string());
+    }
+
+    None
+}
+
+fn read_le_u64(bytes: &[u8]) -> Option<u64> {
+    if bytes.len() != std::mem::size_of::<u64>() {
+        return None;
+    }
+
+    let mut raw = [0u8; std::mem::size_of::<u64>()];
+    raw.copy_from_slice(bytes);
+    Some(u64::from_le_bytes(raw))
 }
 
 fn extract_cstrings(data: &[u8], min_len: usize) -> Vec<String> {
