@@ -8,6 +8,7 @@ license.workspace = true
 endeavour-ir = { path = "../endeavour-ir" }
 rayon.workspace = true
 thiserror.workspace = true
+z3 = { version = "0.12", features = ["static-link-z3"] }
 
 [lints]
 workspace = true
