@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::{collections::HashMap, collections::HashSet};
 
 use crate::fmt;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use endeavour_core::config::Config;
 use endeavour_core::store::SessionStore;
@@ -185,6 +185,7 @@ enum ReplCommand {
     Search(String),
     Sessions,
     Session(String),
+    SessionUnknownSubcommand(String),
     Info,
     Findings,
     CacheStats,
@@ -380,6 +381,14 @@ impl Repl {
                             Ok(()) => {}
                             Err(err) => self.render_user_error(UserFacingError::from(err)),
                         }
+                    }
+                    ParsedLine::Command(ReplCommand::SessionUnknownSubcommand(subcommand)) => {
+                        self.render_user_error(UserFacingError::new(
+                            ErrorCategory::Input,
+                            format!("unknown session subcommand '{subcommand}'"),
+                            "valid subcommands: new, list, load <id>, info",
+                            None,
+                        ));
                     }
                     ParsedLine::Command(ReplCommand::Info) => match self.handle_info() {
                         Ok(()) => {}
@@ -1580,8 +1589,7 @@ impl Repl {
 
     fn handle_info(&self) -> Result<()> {
         let Some(session) = &self.active_session else {
-            println!("No active session. Use 'analyze <path>' or 'session <id>'.");
-            return Ok(());
+            return Err(anyhow!("no active session"));
         };
 
         let findings = self
@@ -2306,10 +2314,28 @@ fn parse_command(line: &str) -> ParsedLine {
             }
         }
         "sessions" => ParsedLine::Command(ReplCommand::Sessions),
-        "session" => match tokens.next() {
-            Some(id) => ParsedLine::Command(ReplCommand::Session(id.to_string())),
-            None => ParsedLine::InvalidUsage("session <id>"),
-        },
+        "session" => {
+            let Some(subcommand) = tokens.next() else {
+                return ParsedLine::InvalidUsage("session <new|list|load <id>|info>");
+            };
+
+            match subcommand {
+                "list" if tokens.next().is_none() => ParsedLine::Command(ReplCommand::Sessions),
+                "info" if tokens.next().is_none() => ParsedLine::Command(ReplCommand::Info),
+                "load" => match tokens.next() {
+                    Some(id) if tokens.next().is_none() => {
+                        ParsedLine::Command(ReplCommand::Session(id.to_string()))
+                    }
+                    _ => ParsedLine::InvalidUsage("session load <id>"),
+                },
+                candidate if tokens.next().is_none() && candidate.parse::<uuid::Uuid>().is_ok() => {
+                    ParsedLine::Command(ReplCommand::Session(candidate.to_string()))
+                }
+                _ => ParsedLine::Command(ReplCommand::SessionUnknownSubcommand(
+                    subcommand.to_string(),
+                )),
+            }
+        }
         "info" => ParsedLine::Command(ReplCommand::Info),
         "findings" => ParsedLine::Command(ReplCommand::Findings),
         "cache" => match tokens.next() {
@@ -3145,6 +3171,28 @@ mod tests {
         assert_eq!(
             parse_command("callgraph 0x401000 5"),
             ParsedLine::Command(ReplCommand::Callgraph("0x401000".to_string(), Some(5)))
+        );
+    }
+
+    #[test]
+    fn parse_session_subcommands_and_unknown_values() {
+        assert_eq!(
+            parse_command("session info"),
+            ParsedLine::Command(ReplCommand::Info)
+        );
+        assert_eq!(
+            parse_command("session list"),
+            ParsedLine::Command(ReplCommand::Sessions)
+        );
+        assert_eq!(
+            parse_command("session load 550e8400-e29b-41d4-a716-446655440000"),
+            ParsedLine::Command(ReplCommand::Session(
+                "550e8400-e29b-41d4-a716-446655440000".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_command("session abc"),
+            ParsedLine::Command(ReplCommand::SessionUnknownSubcommand("abc".to_string()))
         );
     }
 
