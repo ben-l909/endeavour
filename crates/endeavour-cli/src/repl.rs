@@ -508,13 +508,43 @@ impl Repl {
     fn handle_connect(&mut self, endpoint: Option<&str>) -> Result<()> {
         let endpoint = endpoint.unwrap_or("localhost:13337");
         let (host, port) = parse_host_port(endpoint)?;
+        let transport = Arc::new(endeavour_ida::HttpTransport::new(&host, port));
+
+        self.handle_connect_with_transport(endpoint, transport)
+    }
+
+    fn handle_connect_with_transport(
+        &mut self,
+        endpoint: &str,
+        transport: Arc<dyn Transport>,
+    ) -> Result<()> {
+        let (host, port) = parse_host_port(endpoint)?;
         let normalized_endpoint = format!("{host}:{port}");
 
-        let (client, functions) = connect_with_transport(
+        let (client, functions) = match connect_with_transport(
             &self.runtime,
             &normalized_endpoint,
-            Arc::new(endeavour_ida::HttpTransport::new(&host, port)),
-        )?;
+            transport,
+        ) {
+            Ok(result) => result,
+            Err(err) => {
+                if let Some(connect_error) = classify_connect_error(&err) {
+                    match connect_error {
+                        ConnectError::MethodNotFound => print_error(
+                            "IDA connection failed",
+                            &["Method not found (code -32601). Check that the IDA MCP plugin is loaded."],
+                        ),
+                        ConnectError::ConnectionRefused => print_error(
+                            "IDA connection failed",
+                            &["connection refused. Is IDA running with the MCP plugin?"],
+                        ),
+                    }
+                    return Ok(());
+                }
+
+                return Err(err);
+            }
+        };
 
         self.ida_client = Some(client);
         save_ida_endpoint(&normalized_endpoint)?;
@@ -1746,6 +1776,40 @@ fn print_error(summary: &str, details: &[&str]) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectError {
+    MethodNotFound,
+    ConnectionRefused,
+}
+
+fn classify_connect_error(error: &anyhow::Error) -> Option<ConnectError> {
+    for cause in error.chain() {
+        if let Some(ida_error) = cause.downcast_ref::<IdaError>() {
+            match ida_error {
+                IdaError::IdaResponseError(message) if is_method_not_found_code(message) => {
+                    return Some(ConnectError::MethodNotFound);
+                }
+                IdaError::ConnectionError(_) => return Some(ConnectError::ConnectionRefused),
+                _ => {}
+            }
+        }
+    }
+
+    let lower = error.to_string().to_ascii_lowercase();
+    if lower.contains("connection refused") {
+        return Some(ConnectError::ConnectionRefused);
+    }
+
+    None
+}
+
+fn is_method_not_found_code(message: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(message)
+        .ok()
+        .and_then(|payload| payload.get("code").and_then(serde_json::Value::as_i64))
+        == Some(-32601)
+}
+
 fn contains_error_text(err: &anyhow::Error, needle: &str) -> bool {
     let needle = needle.to_ascii_lowercase();
     err.chain()
@@ -2872,12 +2936,13 @@ mod tests {
         parse_command, parse_decompile_target, parse_rename_json_payload, rename_symbol,
         render_callgraph_output, render_decompile_output, render_explain_result,
         render_search_output, render_transcript_output, resolve_target_address, set_symbol_comment,
-        CommentPayload, ConfidenceTier, ExplainCommand, FunctionRenamePayload, ParsedLine,
+        CommentPayload, ConfidenceTier, ExplainCommand, FunctionRenamePayload, ParsedLine, Repl,
         RenameCommand, RenameLlmResponse, ReplCommand, ShowTranscriptCommand,
         VariableRenamePayload,
     };
     use endeavour_core::store::SessionStore;
     use endeavour_core::TranscriptRecord;
+    use endeavour_llm::mock::{MockIdaError, MockIdaTransport};
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
@@ -3232,6 +3297,60 @@ mod tests {
         let _typed: Arc<IdaClient> = client;
         assert_eq!(functions.len(), 1);
         assert_eq!(functions[0].name, "sub_401000");
+    }
+
+    #[test]
+    fn connect_method_not_found_returns_ok_and_keeps_client_unset() {
+        let tempdir = tempfile::tempdir();
+        assert!(tempdir.is_ok());
+        let tempdir = tempdir.unwrap_or_else(|_| unreachable!());
+
+        let store = SessionStore::open(&tempdir.path().join("repl.db"));
+        assert!(store.is_ok());
+        let store = store.unwrap_or_else(|_| unreachable!());
+
+        let mut repl = Repl::new(store);
+        assert!(repl.is_ok());
+        let mut repl = repl.unwrap_or_else(|_| unreachable!());
+
+        let transport = Arc::new(
+            MockIdaTransport::builder()
+                .error("list_funcs", "", MockIdaError::MethodNotFound)
+                .build(),
+        );
+
+        let result = repl.handle_connect_with_transport("localhost:13337", transport.clone());
+
+        assert!(result.is_ok());
+        assert!(repl.ida_client.is_none());
+        assert_eq!(transport.calls_by_method("list_funcs"), 1);
+    }
+
+    #[test]
+    fn connect_connection_refused_returns_ok_and_keeps_client_unset() {
+        let tempdir = tempfile::tempdir();
+        assert!(tempdir.is_ok());
+        let tempdir = tempdir.unwrap_or_else(|_| unreachable!());
+
+        let store = SessionStore::open(&tempdir.path().join("repl.db"));
+        assert!(store.is_ok());
+        let store = store.unwrap_or_else(|_| unreachable!());
+
+        let mut repl = Repl::new(store);
+        assert!(repl.is_ok());
+        let mut repl = repl.unwrap_or_else(|_| unreachable!());
+
+        let transport = Arc::new(
+            MockIdaTransport::builder()
+                .error("list_funcs", "", MockIdaError::Connection)
+                .build(),
+        );
+
+        let result = repl.handle_connect_with_transport("localhost:13337", transport.clone());
+
+        assert!(result.is_ok());
+        assert!(repl.ida_client.is_none());
+        assert_eq!(transport.calls_by_method("list_funcs"), 1);
     }
 
     #[test]
