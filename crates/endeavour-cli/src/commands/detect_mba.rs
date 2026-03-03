@@ -138,9 +138,9 @@ fn render_detect_mba_output(function_name: &str, address: u64, matches: &[MbaMat
 
     for (index, detected) in matches.iter().enumerate() {
         let badge = if detected.verified {
-            "[verified]"
+            fmt::success("[verified]")
         } else {
-            "[candidate]"
+            fmt::dim("[candidate]")
         };
 
         println!(
