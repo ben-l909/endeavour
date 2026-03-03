@@ -181,7 +181,7 @@ async fn run_browser_pkce_flow(
 
     let callback_path = config.callback_path.to_string();
     let expected_state = state.clone();
-    tokio::spawn(async move {
+    let callback_handle = tokio::spawn(async move {
         let result = wait_for_callback(listener, &callback_path, &expected_state).await;
         let _ = callback_tx.send(result);
     });
@@ -199,10 +199,17 @@ async fn run_browser_pkce_flow(
     (browser_opener)(&authorize_url)?;
     println!("Waiting for authorization in browser... (Ctrl+C to cancel)");
 
-    let callback = tokio::time::timeout(config.callback_timeout, callback_rx)
-        .await
-        .map_err(|_| OpenAiOAuthError::AuthorizationCancelled)?
-        .map_err(|_| OpenAiOAuthError::AuthorizationCancelled)??;
+    let callback = tokio::select! {
+        result = callback_rx => {
+            result
+                .map_err(|_| OpenAiOAuthError::AuthorizationCancelled)?
+                .map_err(|_| OpenAiOAuthError::AuthorizationCancelled)?
+        }
+        _ = tokio::time::sleep(config.callback_timeout) => {
+            callback_handle.abort();
+            return Err(OpenAiOAuthError::AuthorizationCancelled);
+        }
+    };
 
     let token = exchange_authorization_code(
         client,
