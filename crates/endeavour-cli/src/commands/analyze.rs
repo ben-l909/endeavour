@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::auth::resolver::apply_resolved_credentials;
 use crate::fmt;
 use crate::repl::{ExplainCommand, RenameCommand, Repl};
 use anyhow::{Context, Result};
@@ -194,7 +195,8 @@ pub(crate) fn handle_explain(repl: &Repl, command: &ExplainCommand) -> Result<()
 
     println!("Analyzing function at {}...", fmt::format_addr(address));
 
-    let config = Config::load().context("failed to load config")?;
+    let mut config = Config::load().context("failed to load config")?;
+    apply_resolved_credentials(&mut config).context("failed to resolve credentials")?;
     let provider = match ProviderSelection::parse(&command.provider) {
         Ok(value) => Some(value),
         Err(LlmError::Configuration(message)) => {
@@ -572,7 +574,8 @@ fn handle_rename_llm_single(repl: &mut Repl, target: &str, command: &RenameComma
         }
     };
 
-    let config = Config::load().context("failed to load config")?;
+    let mut config = Config::load().context("failed to load config")?;
+    apply_resolved_credentials(&mut config).context("failed to resolve credentials")?;
     let provider_selection = match ProviderSelection::parse(&command.provider) {
         Ok(value) => Some(value),
         Err(LlmError::Configuration(message)) => {
@@ -713,7 +716,8 @@ fn handle_rename_all(repl: &mut Repl, command: &RenameCommand) -> Result<()> {
         return Ok(());
     };
 
-    let config = Config::load().context("failed to load config")?;
+    let mut config = Config::load().context("failed to load config")?;
+    apply_resolved_credentials(&mut config).context("failed to resolve credentials")?;
     let provider_selection = ProviderSelection::parse(&command.provider).ok();
     let router = match LlmRouter::new(
         config.clone(),
