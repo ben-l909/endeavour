@@ -8,6 +8,8 @@ pub enum LlmError {
     Http(#[from] reqwest::Error),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("Configuration error: {0}")]
+    Configuration(String),
     #[error("OpenAI error: {0}")]
     OpenAi(String),
     #[error("Anthropic API error ({status}): {body}")]
