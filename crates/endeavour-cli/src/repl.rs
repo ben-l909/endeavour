@@ -31,6 +31,7 @@ enum ReplCommand {
     IdaStatus,
     Decompile(String),
     Lift(String),
+    Normalize(String),
     Explain(ExplainCommand),
     Rename(RenameCommand),
     Review,
@@ -195,6 +196,20 @@ impl Repl {
                     Err(error) => println!("{}", error.render()),
                 }
             }
+            ParsedLine::Command(ReplCommand::Normalize(target)) => {
+                match commands::handle_normalize(&self.ir_frontends, &target) {
+                    Ok(render) => {
+                        if let Some(frontend) = render.active_frontend.as_deref() {
+                            println!("  ● IR frontend: {frontend}");
+                        }
+                        println!("  ● {} expressions normalized.", render.normalized_count);
+                        for line in render.lines {
+                            println!("  ● {line}");
+                        }
+                    }
+                    Err(error) => println!("{}", error.render()),
+                }
+            }
             ParsedLine::Command(ReplCommand::Explain(command)) => {
                 if let Err(e) = commands::handle_explain(self, &command) {
                     eprintln!("✗ error: {e}");
@@ -353,6 +368,10 @@ fn parse_command(line: &str) -> ParsedLine {
         "lift" => match tokens.next() {
             Some(target) => ParsedLine::Command(ReplCommand::Lift(target.to_string())),
             None => ParsedLine::InvalidUsage("lift <hex_address>"),
+        },
+        "normalize" | "canonicalize" => match tokens.next() {
+            Some(target) => ParsedLine::Command(ReplCommand::Normalize(target.to_string())),
+            None => ParsedLine::InvalidUsage("normalize <hex_address>"),
         },
         "explain" => {
             let args = std::iter::once("explain")
@@ -546,6 +565,7 @@ fn print_help() {
     println!("  ida-status           Check IDA connection health");
     println!("  decompile <addr>     Decompile function (0x..., decimal, or sub_...)");
     println!("  lift <hex_address>   Lift function IR using active frontend");
+    println!("  normalize <hex_address>  Normalize function IR expressions");
     println!("  explain <addr> [--provider <claude|gpt|auto|ollama>] [--no-fallback]");
     println!("  rename <addr> <new_name>  Manual rename");
     println!("  rename --llm <addr> [--provider <claude|gpt|auto|ollama>] [--no-fallback]");
@@ -601,6 +621,14 @@ mod tests {
         assert_eq!(
             parse_command("lift 0x401000"),
             ParsedLine::Command(ReplCommand::Lift("0x401000".to_string()))
+        );
+        assert_eq!(
+            parse_command("normalize 0x401000"),
+            ParsedLine::Command(ReplCommand::Normalize("0x401000".to_string()))
+        );
+        assert_eq!(
+            parse_command("canonicalize 0x401000"),
+            ParsedLine::Command(ReplCommand::Normalize("0x401000".to_string()))
         );
         assert_eq!(
             parse_command("explain 0x401000"),

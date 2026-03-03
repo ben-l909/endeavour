@@ -16,6 +16,8 @@ const KNOWN_COMMAND_KEYWORDS: &[&str] = &[
     "search",
     "decompile",
     "lift",
+    "normalize",
+    "canonicalize",
     "findings",
     "info",
     "config",
@@ -53,6 +55,15 @@ const LIFT_NL_PHRASES: &[&str] = &[
     "show all statements",
     "decompile",
     "decompile this",
+];
+
+const NORMALIZE_NL_PHRASES: &[&str] = &[
+    "normalize this function",
+    "normalize the ir",
+    "normalize ir",
+    "canonicalize this function",
+    "canonicalize the ir",
+    "canonicalize ir",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +156,16 @@ impl IntentRouter {
         let trimmed = input.trim();
         if trimmed.is_empty() {
             return Ok(RouteOutcome::IgnoredEmpty);
+        }
+
+        if let Some(result) = detect_normalize_nl_command(trimmed, &context) {
+            match result {
+                Ok(command) => {
+                    command_handler.dispatch_command(&command)?;
+                    return Ok(RouteOutcome::CommandDispatched);
+                }
+                Err(message) => return Ok(RouteOutcome::SystemError(message)),
+            }
         }
 
         if let Some(result) = detect_lift_nl_command(trimmed, &context) {
@@ -344,6 +365,33 @@ fn detect_lift_nl_command(
             ))
         },
         |addr| Some(Ok(format!("lift {addr}"))),
+    )
+}
+
+fn detect_normalize_nl_command(
+    input: &str,
+    context: &IntentSessionContext,
+) -> Option<Result<String, String>> {
+    let normalized = input.trim().to_ascii_lowercase();
+    let matches_phrase = NORMALIZE_NL_PHRASES
+        .iter()
+        .any(|phrase| normalized == *phrase);
+    if !matches_phrase {
+        return None;
+    }
+
+    if let Some(addr) = extract_hex_address(input) {
+        return Some(Ok(format!("normalize {addr}")));
+    }
+
+    context.current_function_addr.as_ref().map_or_else(
+        || {
+            Some(Err(
+                "I don't have a current function in focus. Provide an address or function name first."
+                    .to_string(),
+            ))
+        },
+        |addr| Some(Ok(format!("normalize {addr}"))),
     )
 }
 
@@ -645,6 +693,54 @@ mod tests {
 
         assert_eq!(outcome, RouteOutcome::CommandDispatched);
         assert_eq!(command_handler.dispatched, vec!["lift 0x100004a20"]);
+        assert!(agentic_handler.requests.is_empty());
+    }
+
+    #[test]
+    fn normalize_natural_language_routes_to_normalize_command() {
+        let mut controller = controller();
+        let mut command_handler = RecordingCommandHandler::default();
+        let mut agentic_handler = RecordingAgenticHandler::default();
+
+        let router = IntentRouter::new();
+        let context = IntentSessionContext {
+            current_function_addr: Some("0x100004a20".to_string()),
+            ..IntentSessionContext::default()
+        };
+        let outcome = router
+            .route(
+                "canonicalize this function",
+                context,
+                &mut controller,
+                &mut command_handler,
+                &mut agentic_handler,
+            )
+            .unwrap_or_else(|err| panic!("unexpected routing error: {err}"));
+
+        assert_eq!(outcome, RouteOutcome::CommandDispatched);
+        assert_eq!(command_handler.dispatched, vec!["normalize 0x100004a20"]);
+        assert!(agentic_handler.requests.is_empty());
+    }
+
+    #[test]
+    fn canonicalize_keyword_routes_to_command() {
+        let mut controller = controller();
+        let mut command_handler = RecordingCommandHandler::default();
+        let mut agentic_handler = RecordingAgenticHandler::default();
+
+        let router = IntentRouter::new();
+        let outcome = router
+            .route(
+                "canonicalize 0x100004a20",
+                IntentSessionContext::default(),
+                &mut controller,
+                &mut command_handler,
+                &mut agentic_handler,
+            )
+            .unwrap_or_else(|err| panic!("unexpected routing error: {err}"));
+
+        assert_eq!(outcome, RouteOutcome::CommandDispatched);
+        assert_eq!(command_handler.dispatched, vec!["canonicalize 0x100004a20"]);
         assert!(agentic_handler.requests.is_empty());
     }
 
