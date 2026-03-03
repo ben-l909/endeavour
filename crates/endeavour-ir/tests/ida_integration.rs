@@ -27,7 +27,11 @@ impl<T: McpTransport> IdaFrontend<T> {
             return Err(IrError::BackendUnavailable);
         }
 
-        Ok(payload.instructions.into_iter().map(map_instruction).collect())
+        Ok(payload
+            .instructions
+            .into_iter()
+            .map(map_instruction)
+            .collect())
     }
 
     fn eval_microcode(&self, addr: u64) -> Result<Value, IrError> {
@@ -109,9 +113,11 @@ fn map_instruction(raw: RawInstruction) -> Stmt {
     }
 
     if let Some(bin_op) = map_binary_opcode(&raw.opcode) {
-        if let (Some(dst), Some(lhs), Some(rhs)) =
-            (raw.dst, lowered_args.first().cloned(), lowered_args.get(1).cloned())
-        {
+        if let (Some(dst), Some(lhs), Some(rhs)) = (
+            raw.dst,
+            lowered_args.first().cloned(),
+            lowered_args.get(1).cloned(),
+        ) {
             return Stmt::Assign {
                 dst: ValueId(dst),
                 expr: Expr::Binary {
