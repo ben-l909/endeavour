@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use endeavour_core::config::Config;
 use endeavour_core::store::SessionStore;
 use endeavour_core::{loader, Session};
-use endeavour_ida::{DecompileResult, IdaClient, Transport};
+use endeavour_ida::{DecompileResult, IdaClient, IdaError, Transport};
 use endeavour_llm::{create_provider, CompletionRequest, CompletionResponse, LlmError, LlmProvider, Message, Role};
 use reedline::{DefaultPrompt, DefaultPromptSegment, FileBackedHistory, Reedline, Signal};
 use tokio::runtime::Runtime;
@@ -304,16 +304,20 @@ impl Repl {
 
         let (address, function_name) = match resolve_target_address(&self.runtime, client.as_ref(), target) {
             Ok(value) => value,
-            Err(_) => {
-                println!("No function at address");
+            Err(err) => {
+                println!("Failed to resolve target '{target}': {err}");
                 return Ok(());
             }
         };
 
         let decompile_result = match self.runtime.block_on(client.decompile(address)) {
             Ok(value) => value,
-            Err(_) => {
+            Err(err) if is_missing_function_error(&err) => {
                 println!("No function at address");
+                return Ok(());
+            }
+            Err(err) => {
+                println!("Failed to decompile {}: {err}", fmt::format_addr(address));
                 return Ok(());
             }
         };
@@ -321,15 +325,16 @@ impl Repl {
         println!("Analyzing function at {}...", fmt::format_addr(address));
 
         let config = Config::load().context("failed to load config")?;
+        let api_key_hint = explain_api_key_hint(&config);
         if !has_llm_api_key(&config) {
-            println!("No API key configured. Run: config set anthropic_api_key <key>");
+            println!("No API key configured. Run: {api_key_hint}");
             return Ok(());
         }
 
         let provider = match create_provider(&config) {
             Ok(provider) => provider,
             Err(LlmError::AuthFailed) => {
-                println!("LLM provider authentication failed. Check your API key with: config set anthropic_api_key <key>");
+                println!("LLM provider authentication failed. Check your API key with: {api_key_hint}");
                 return Ok(());
             }
             Err(err) => {
@@ -359,8 +364,8 @@ impl Repl {
 
         let (address, _) = match resolve_target_address(&self.runtime, client.as_ref(), target) {
             Ok(value) => value,
-            Err(_) => {
-                println!("No function at address");
+            Err(err) => {
+                println!("{}", format_resolve_target_error(target, &err));
                 return Ok(());
             }
         };
@@ -381,8 +386,8 @@ impl Repl {
 
         let (address, _) = match resolve_target_address(&self.runtime, client.as_ref(), target) {
             Ok(value) => value,
-            Err(_) => {
-                println!("No function at address");
+            Err(err) => {
+                println!("{}", format_resolve_target_error(target, &err));
                 return Ok(());
             }
         };
@@ -1036,6 +1041,19 @@ fn resolve_target_address(runtime: &Runtime, client: &IdaClient, target: &str) -
     Ok((function.address, function.name))
 }
 
+fn format_resolve_target_error(target: &str, err: &anyhow::Error) -> String {
+    if is_target_not_found_error(target, err) {
+        return format!("No function at address {target}");
+    }
+
+    format!("Failed to resolve target '{target}': {err:#}")
+}
+
+fn is_target_not_found_error(target: &str, err: &anyhow::Error) -> bool {
+    let expected = format!("function '{target}' not found");
+    err.chain().any(|cause| cause.to_string() == expected)
+}
+
 fn parse_decompile_target(raw: &str) -> Option<u64> {
     let input = raw.trim();
     if let Some(hex) = input.strip_prefix("0x").or_else(|| input.strip_prefix("0X")) {
@@ -1055,6 +1073,25 @@ fn parse_decompile_target(raw: &str) -> Option<u64> {
 
 fn has_llm_api_key(config: &Config) -> bool {
     config.anthropic_api_key.is_some() || config.openai_api_key.is_some()
+}
+
+fn explain_api_key_hint(config: &Config) -> String {
+    match config.default_provider.as_deref() {
+        Some("anthropic") => "config set anthropic_api_key <key>".to_string(),
+        Some("openai") => "config set openai_api_key <key>".to_string(),
+        _ => {
+            "config set anthropic_api_key <key> or config set openai_api_key <key>".to_string()
+        }
+    }
+}
+
+fn is_missing_function_error(error: &IdaError) -> bool {
+    match error {
+        IdaError::IdaResponseError(message) | IdaError::DeserializationError(message) => {
+            message.to_ascii_lowercase().contains("not found")
+        }
+        _ => false,
+    }
 }
 
 fn format_llm_error(error: &LlmError) -> String {
@@ -1109,8 +1146,9 @@ fn render_search_output(matches: &[(u64, String)]) -> String {
 mod tests {
     use super::{
         build_explain_request, complete_explain_request, connect_with_transport,
-        fetch_search_results, parse_command, parse_decompile_target,
-        rename_symbol, set_symbol_comment,
+        explain_api_key_hint, fetch_search_results, is_missing_function_error, parse_command, parse_decompile_target,
+        rename_symbol, resolve_target_address, set_symbol_comment,
+        format_resolve_target_error,
         render_callgraph_output, render_decompile_output, render_explain_result,
         render_search_output, ParsedLine, ReplCommand,
     };
@@ -1533,5 +1571,94 @@ mod tests {
         let rendered = render_explain_result("sub_401000", 0x401000, &response.content);
         assert!(rendered.contains("Function Analysis: sub_401000 @ 0x00401000"));
         assert!(rendered.contains("parses a header"));
+    }
+
+    #[test]
+    fn explain_api_key_hint_uses_default_provider() {
+        let config = Config {
+            anthropic_api_key: None,
+            openai_api_key: None,
+            default_provider: Some("openai".to_string()),
+        };
+
+        assert_eq!(explain_api_key_hint(&config), "config set openai_api_key <key>");
+    }
+
+    #[test]
+    fn explain_api_key_hint_without_default_provider_lists_both() {
+        let config = Config::default();
+
+        assert_eq!(
+            explain_api_key_hint(&config),
+            "config set anthropic_api_key <key> or config set openai_api_key <key>"
+        );
+    }
+
+    #[test]
+    fn missing_function_error_detection_matches_not_found_only() {
+        assert!(is_missing_function_error(&IdaError::IdaResponseError(
+            "Function not found".to_string()
+        )));
+        assert!(!is_missing_function_error(&IdaError::ConnectionError(
+            "refused".to_string()
+        )));
+    }
+
+    #[test]
+    fn resolve_target_not_found_formats_no_function_message() {
+        let runtime = Runtime::new();
+        assert!(runtime.is_ok());
+        let runtime = match runtime {
+            Ok(value) => value,
+            Err(err) => panic!("failed to create runtime: {err}"),
+        };
+
+        let mock = Arc::new(MockTransport::new(vec![Ok(json!([
+            {
+                "fn": null
+            }
+        ]))]));
+        let client = IdaClient::with_transport("127.0.0.1", 13337, mock.clone());
+
+        let target = "missing_symbol";
+        let result = resolve_target_address(&runtime, &client, target);
+        assert!(result.is_err());
+        let err = match result {
+            Ok(_) => panic!("expected resolve_target_address to fail"),
+            Err(err) => err,
+        };
+
+        let message = format_resolve_target_error(target, &err);
+        assert_eq!(message, "No function at address missing_symbol");
+        assert_eq!(mock.first_call_method().as_deref(), Some("lookup_funcs"));
+    }
+
+    #[test]
+    fn resolve_target_transport_error_preserves_context_message() {
+        let runtime = Runtime::new();
+        assert!(runtime.is_ok());
+        let runtime = match runtime {
+            Ok(value) => value,
+            Err(err) => panic!("failed to create runtime: {err}"),
+        };
+
+        let mock = Arc::new(MockTransport::new(vec![Err(IdaError::IdaResponseError(
+            "transport unavailable".to_string(),
+        ))]));
+        let client = IdaClient::with_transport("127.0.0.1", 13337, mock.clone());
+
+        let target = "main";
+        let result = resolve_target_address(&runtime, &client, target);
+        assert!(result.is_err());
+        let err = match result {
+            Ok(_) => panic!("expected resolve_target_address to fail"),
+            Err(err) => err,
+        };
+
+        let message = format_resolve_target_error(target, &err);
+        assert!(message.contains("Failed to resolve target 'main'"));
+        assert!(message.contains("failed to resolve function 'main'"));
+        assert!(message.contains("IDA returned error: transport unavailable"));
+        assert_eq!(mock.first_call_method().as_deref(), Some("lookup_funcs"));
     }
 }
